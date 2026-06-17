@@ -27,28 +27,33 @@ def prepare(date, strategy):
             return
         table_name = strategy['name']
         strategy_func = strategy['func']
+
+        cols_type = tbs.get_field_types(tbs.TABLE_CN_STOCK_STRATEGIES[0]['columns'])
+
+        # 确保表存在（无论本日是否有结果都先建表）
+        if not mdb.checkTableIsExist(table_name):
+            empty = pd.DataFrame(columns=list(tbs.TABLE_CN_STOCK_FOREIGN_KEY['columns']) +
+                                          list(tbs.TABLE_CN_STOCK_BACKTEST_DATA['columns']))
+            mdb.insert_db_from_df(empty, table_name, cols_type, False, "`date`,`code`")
+        else:
+            cols_type = None
+
         results = run_check(strategy_func, table_name, stocks_data, date)
         if results is None:
             return
 
-        # 删除老数据。
-        if mdb.checkTableIsExist(table_name):
-            del_sql = f"DELETE FROM `{table_name}` where `date` = '{date}'"
-            mdb.executeSql(del_sql)
-            cols_type = None
-        else:
-            cols_type = tbs.get_field_types(tbs.TABLE_CN_STOCK_STRATEGIES[0]['columns'])
+        # 删除本日旧数据
+        date_str = date.strftime("%Y-%m-%d")
+        mdb.executeSql(f"DELETE FROM `{table_name}` WHERE `date` = '{date_str}'")
 
         data = pd.DataFrame(results)
         columns = tuple(tbs.TABLE_CN_STOCK_FOREIGN_KEY['columns'])
         data.columns = columns
         _columns_backtest = tuple(tbs.TABLE_CN_STOCK_BACKTEST_DATA['columns'])
         data = pd.concat([data, pd.DataFrame(columns=_columns_backtest)])
-        # 单例，时间段循环必须改时间
-        date_str = date.strftime("%Y-%m-%d")
-        if date.strftime("%Y-%m-%d") != data.iloc[0]['date']:
+        if date_str != data.iloc[0]['date']:
             data['date'] = date_str
-        mdb.insert_db_from_df(data, table_name, cols_type, False, "`date`,`code`")
+        mdb.insert_db_from_df(data, table_name, None, False, "`date`,`code`")
 
     except Exception as e:
         logging.error(f"strategy_data_daily_job.prepare处理异常：{strategy}策略{e}")

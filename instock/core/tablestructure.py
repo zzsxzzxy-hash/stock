@@ -14,6 +14,7 @@ from instock.core.strategy import parking_apron
 from instock.core.strategy import low_backtrace_increase
 from instock.core.strategy import keep_increasing
 from instock.core.strategy import high_tight_flag
+from instock.core.strategy import volume_surge
 
 __author__ = 'myh '
 __date__ = '2023/3/10 '
@@ -411,7 +412,26 @@ TABLE_CN_STOCK_STRATEGIES = [
     {'name': 'cn_stock_strategy_climax_limitdown', 'cn': '放量跌停', 'size': 70, 'func': climax_limitdown.check,
      'columns': _tmp_columns},
     {'name': 'cn_stock_strategy_low_atr', 'cn': '低ATR成长', 'size': 70, 'func': low_atr.check_low_increase,
-     'columns': _tmp_columns}
+     'columns': _tmp_columns},
+]
+
+# 自有策略专用列定义（date/code/name + 信号日行情字段）
+_custom_columns = {
+    'date':         {'type': DATE,                      'cn': '日期',       'size': 0},
+    'code':         {'type': VARCHAR(6,  _COLLATE),     'cn': '代码',       'size': 60},
+    'name':         {'type': VARCHAR(20, _COLLATE),     'cn': '名称',       'size': 70},
+    'signal_close': {'type': FLOAT,                     'cn': '信号日收盘', 'size': 80},
+    'signal_vol':   {'type': FLOAT,                     'cn': '信号日成交量','size': 80},
+    'prev_vol':     {'type': FLOAT,                     'cn': '昨日成交量', 'size': 80},
+    'vol_ratio':    {'type': FLOAT,                     'cn': '量比',       'size': 80},
+    'turnover':     {'type': FLOAT,                     'cn': '换手率',     'size': 80},
+    'p_change':     {'type': FLOAT,                     'cn': '涨跌幅',     'size': 80},
+}
+
+# 自有策略（独立维护，不参与常规策略同步）
+TABLE_CN_STOCK_CUSTOM_STRATEGIES = [
+    {'name': 'cn_stock_strategy_volume_surge', 'cn': '爆量股票', 'size': 3,
+     'func': volume_surge.check, 'columns': _custom_columns},
 ]
 
 STOCK_KLINE_PATTERN_DATA = {'name': 'cn_stock_pattern_recognitions', 'cn': 'K线形态',
@@ -987,38 +1007,6 @@ CN_STOCK_CPBD = {'name': 'cn_stock_cpbd', 'cn': '操盘必读',
                              'LOAN_REPAY_VOL': {'type': FLOAT, 'cn': '融券还量'},
                              'LOAN_BALANCE': {'type': FLOAT, 'cn': '融券余额'}}}
 
-
-TABLE_CN_STOCK_CHIP_RACE_OPEN = {'name': 'cn_stock_chip_race_open', 'cn': '早盘抢筹数据',
-                     'columns': {'date': {'type': DATE, 'cn': '日期', 'size': 0},
-                                 'code': {'type': VARCHAR(6, _COLLATE), 'cn': '代码', 'size': 60},
-                                 'name': {'type': VARCHAR(20, _COLLATE), 'cn': '名称', 'size': 120},
-                                 'new_price': {'type': FLOAT, 'cn': '最新价', 'size': 70},
-                                 'change_rate': {'type': FLOAT, 'cn': '涨跌幅', 'size': 70},
-                                 'pre_close_price': {'type': FLOAT, 'cn': '昨收', 'size': 70},
-                                 'open_price': {'type': FLOAT, 'cn': '今开', 'size': 70},
-                                 'deal_amount': {'type': BIGINT, 'cn': '开盘金额', 'size': 90},
-                                 'bid_rate': {'type': FLOAT, 'cn': '抢筹幅度', 'size': 60},
-                                 'bid_trust_amount': {'type': BIGINT, 'cn': '抢筹委托金额', 'size': 100},
-                                 'bid_deal_amount': {'type': BIGINT, 'cn': '抢筹成交金额', 'size': 100},
-                                 'bid_ratio': {'type': FLOAT, 'cn': '抢筹占比', 'size': 60},
-                                 'limitup_day': {'type': SmallInteger, 'cn': '天', 'size': 40},
-                                 'limitup_board': {'type': SmallInteger, 'cn': '板', 'size': 40}}}
-
-TABLE_CN_STOCK_CHIP_RACE_END = {'name': 'cn_stock_chip_race_end', 'cn': '尾盘抢筹数据',
-                     'columns': {'date': {'type': DATE, 'cn': '日期', 'size': 0},
-                                 'code': {'type': VARCHAR(6, _COLLATE), 'cn': '代码', 'size': 60},
-                                 'name': {'type': VARCHAR(20, _COLLATE), 'cn': '名称', 'size': 120},
-                                 'new_price': {'type': FLOAT, 'cn': '最新价', 'size': 70},
-                                 'change_rate': {'type': FLOAT, 'cn': '涨跌幅', 'size': 70},
-                                 'pre_close_price': {'type': FLOAT, 'cn': '昨收', 'size': 70},
-                                 'open_price': {'type': FLOAT, 'cn': '今开', 'size': 70},
-                                 'deal_amount': {'type': BIGINT, 'cn': '收盘金额', 'size': 90},
-                                 'bid_rate': {'type': FLOAT, 'cn': '抢筹幅度', 'size': 60},
-                                 'bid_trust_amount': {'type': BIGINT, 'cn': '抢筹委托金额', 'size': 100},
-                                 'bid_deal_amount': {'type': BIGINT, 'cn': '抢筹成交金额', 'size': 100},
-                                 'bid_ratio': {'type': FLOAT, 'cn': '抢筹占比', 'size': 60},
-                                 'limitup_day': {'type': SmallInteger, 'cn': '天', 'size': 40},
-                                 'limitup_board': {'type': SmallInteger, 'cn': '板', 'size': 40}}}
 
 TABLE_CN_STOCK_LIMITUP_REASON = {'name': 'cn_stock_limitup_reason', 'cn': '涨停原因揭密',
                      'columns': {'date': {'type': DATE, 'cn': '日期', 'size': 0},

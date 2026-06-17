@@ -45,6 +45,20 @@
             </a>
             <b class="arrow"></b>
         </li>
+        {% set isSyncOpen = "" %}
+        {% try %}
+            {% if request.uri == "/instock/sync" %}
+                {% set isSyncOpen = "active" %}
+            {% end %}
+        {% except %}
+        {% end %}
+        <li class="{{ isSyncOpen }}">
+            <a href="/instock/sync">
+                <i class="menu-icon fa fa-refresh"></i>
+                <span class="menu-text">数据同步管理</span>
+            </a>
+            <b class="arrow"></b>
+        </li>
         {% set isOpenStr = "" %}
         {% try %}
             {% if request.uri == "/" or request.uri == "/instock/" %}

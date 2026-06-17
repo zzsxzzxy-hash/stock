@@ -50,10 +50,9 @@ class SaveCollectHandler(webBase.BaseHandler, ABC):
         otype = self.get_argument("otype", default=None, strip=False)
         try:
             table_name = tbs.TABLE_CN_STOCK_ATTENTION['name']
-            if otype == '1':
-                # sql = f"DELETE FROM `{table_name}` WHERE `code` = '{code}'"
+            if otype in ('1', 'del'):
                 sql = f"DELETE FROM `{table_name}` WHERE `code` = %s"
-                self.db.query(sql,code)
+                self.db.query(sql, code)
             else:
                 # sql = f"INSERT INTO `{table_name}`(`datetime`, `code`) VALUE('{datetime.datetime.now()}','{code}')"
                 sql = f"INSERT INTO `{table_name}`(`datetime`, `code`) VALUE(%s, %s)"

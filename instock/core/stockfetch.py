@@ -9,20 +9,14 @@ import pandas as pd
 import talib as tl
 import instock.core.tablestructure as tbs
 import instock.lib.trade_time as trd
-import instock.core.crawling.trade_date_hist as tdh
-import instock.core.crawling.fund_etf_em as fee
 import instock.core.crawling.stock_selection as sst
-import instock.core.crawling.stock_lhb_em as sle
-import instock.core.crawling.stock_lhb_sina as sls
-import instock.core.crawling.stock_dzjy_em as sde
 import instock.core.crawling.stock_hist_em as she
+import instock.core.crawling.fund_etf_em as fee
+import instock.core.crawling.stock_lhb_em as sle
 import instock.core.crawling.stock_fund_em as sff
+import instock.core.crawling.stock_dzjy_em as sde
 import instock.core.crawling.stock_fhps_em as sfe
-import instock.core.crawling.stock_chip_race as scr
-import instock.core.crawling.stock_limitup_reason as slr
-
-__author__ = 'myh '
-__date__ = '2023/3/10 '
+from instock.core.crawling.tushare_data import tushare_data as tsd
 
 # 设置基础目录，每次加载使用。
 cpath_current = os.path.dirname(os.path.dirname(__file__))
@@ -62,7 +56,7 @@ def is_open_with_line(price):
 # 读取股票交易日历数据
 def fetch_stocks_trade_date():
     try:
-        data = tdh.tool_trade_date_hist_sina()
+        data = tsd.get_trade_cal()
         if data is None or len(data.index) == 0:
             return None
         data_date = set(data['trade_date'].values.tolist())
@@ -72,7 +66,7 @@ def fetch_stocks_trade_date():
     return None
 
 
-# 读取当天股票数据
+# 读取当天ETF数据
 def fetch_etfs(date):
     try:
         data = fee.fund_etf_spot_em()
@@ -100,8 +94,13 @@ def fetch_stocks(date):
             data.insert(0, 'date', datetime.datetime.now().strftime("%Y-%m-%d"))
         else:
             data.insert(0, 'date', date.strftime("%Y-%m-%d"))
-        data.columns = list(tbs.TABLE_CN_STOCK_SPOT['columns'])
-        data = data.loc[data['code'].apply(is_a_stock)].loc[data['new_price'].apply(is_open)]
+
+        # 补齐缺失列以匹配表结构
+        target_columns = list(tbs.TABLE_CN_STOCK_SPOT['columns'])
+        for col in target_columns:
+            if col not in data.columns:
+                data[col] = np.nan
+        data = data[target_columns]
         return data
     except Exception as e:
         logging.error(f"stockfetch.fetch_stocks处理异常：{e}")
@@ -199,10 +198,10 @@ def fetch_stock_top_entity_data(date):
         logging.error(f"stockfetch.fetch_stock_top_entity_data处理异常：{e}")
     return None
 
-# 描述: 获取东方财富-龙虎榜-个股上榜统计
-def fetch_stock_lhb_data(date,count=12):
+# 描述: 获取龙虎榜-个股上榜统计
+def fetch_stock_lhb_data(date, count=12):
     try:
-        start_date = trd.get_previous_trade_date(date,count).strftime("%Y%m%d")
+        start_date = trd.get_previous_trade_date(date, count).strftime("%Y%m%d")
         end_date = date.strftime("%Y%m%d")
 
         data = sle.stock_lhb_detail_em(start_date, end_date)
@@ -213,7 +212,6 @@ def fetch_stock_lhb_data(date,count=12):
         data.columns = _columns
         data = data.loc[data['code'].apply(is_a_stock)]
         data.drop_duplicates('code', keep='last', inplace=True)
-        # data = data.sort_values(by='ranking_times', ascending=False)
         if date is None:
             data.insert(0, 'date', datetime.datetime.now().strftime("%Y-%m-%d"))
         else:
@@ -223,10 +221,12 @@ def fetch_stock_lhb_data(date,count=12):
         logging.error(f"stockfetch.fetch_stock_lhb_data处理异常：{e}")
     return None
 
-# 描述: 获取新浪财经-龙虎榜-个股上榜统计
+# 描述: 获取龙虎榜-个股上榜统计（Tushare top_list按代码聚合，默认最近5个交易日）
 def fetch_stock_top_data(date):
     try:
-        data = sls.stock_lhb_ggtj_sina()
+        end = date if date else datetime.datetime.now().date()
+        start = trd.get_previous_trade_date(end, 5)
+        data = tsd.get_lhb_ggtj(start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d"))
         if data is None or len(data.index) == 0:
             return None
         _columns = list(tbs.TABLE_CN_STOCK_TOP['columns'])
@@ -244,7 +244,7 @@ def fetch_stock_top_data(date):
     return None
 
 
-# 描述: 获取东方财富网-数据中心-大宗交易-每日统计
+# 描述: 获取大宗交易-每日统计
 def fetch_stock_blocktrade_data(date):
     date_str = date.strftime("%Y%m%d")
     try:
@@ -265,49 +265,10 @@ def fetch_stock_blocktrade_data(date):
         logging.error(f"stockfetch.fetch_stock_blocktrade_data处理异常：{e}")
     return None
 
-# 读取早盘抢筹
-def fetch_stock_chip_race_open(date):
-    try:
-        date_str =""
-        if date != datetime.datetime.now().date():
-            date_str = date.strftime("%Y%m%d")
-        data = scr.stock_chip_race_open(date_str)
-        if data is None or len(data.index) == 0:
-            return None
-        if date is None:
-            data.insert(0, 'date', datetime.datetime.now().strftime("%Y-%m-%d"))
-        else:
-            data.insert(0, 'date', date.strftime("%Y-%m-%d"))
-        data.columns = list(tbs.TABLE_CN_STOCK_CHIP_RACE_OPEN['columns'])
-        return data
-    except Exception as e:
-        logging.error(f"stockfetch.fetch_stock_chip_race_open处理异常：{e}")
-    return None
-
-# 读取尾盘抢筹
-def fetch_stock_chip_race_end(date):
-    try:
-        date_str =""
-        if date != datetime.datetime.now().date():
-            date_str = date.strftime("%Y%m%d")
-        data = scr.stock_chip_race_end(date_str)
-        if data is None or len(data.index) == 0:
-            return None
-        if date is None:
-            data.insert(0, 'date', datetime.datetime.now().strftime("%Y-%m-%d"))
-        else:
-            data.insert(0, 'date', date.strftime("%Y-%m-%d"))
-        data.columns = list(tbs.TABLE_CN_STOCK_CHIP_RACE_END['columns'])
-        return data
-    except Exception as e:
-        logging.error(f"stockfetch.fetch_stock_chip_race_end处理异常：{e}")
-    return None
-
 # 读取涨停原因
 def fetch_stock_limitup_reason(date):
-
     try:
-        data = slr.stock_limitup_reason(date.strftime("%Y-%m-%d"))
+        data = tsd.get_limitup_reason(date.strftime("%Y-%m-%d"))
         if data is None or len(data.index) == 0:
             return None
         data.columns = list(tbs.TABLE_CN_STOCK_LIMITUP_REASON['columns'])
@@ -316,7 +277,7 @@ def fetch_stock_limitup_reason(date):
         logging.error(f"stockfetch.fetch_stock_limitup_reason处理异常：{e}")
     return None
 
-# 读取股票历史数据
+# 读取ETF历史数据
 def fetch_etf_hist(data_base, date_start=None, date_end=None, adjust='qfq'):
     date = data_base[0]
     code = data_base[1]
@@ -336,7 +297,7 @@ def fetch_etf_hist(data_base, date_start=None, date_end=None, adjust='qfq'):
         data = data.sort_index()  # 将数据按照日期排序下。
         if data is not None:
             data.loc[:, 'p_change'] = tl.ROC(data['close'].values, 1)
-            data['p_change'].values[np.isnan(data['p_change'].values)] = 0.0
+            data['p_change'] = data['p_change'].fillna(0.0)
             data["volume"] = data['volume'].values.astype('double') * 100  # 成交量单位从手变成股。
         return data
     except Exception as e:
@@ -350,13 +311,14 @@ def fetch_stock_hist(data_base, date_start=None, is_cache=True):
     code = data_base[1]
 
     if date_start is None:
-        date_start, is_cache = trd.get_trade_hist_interval(date)  # 提高运行效率，只运行一次
-        # date_end = date_end.strftime("%Y%m%d")
+        # 将datetime转换为字符串格式
+        date_str = date.strftime("%Y-%m-%d") if hasattr(date, 'strftime') else str(date)
+        date_start, is_cache = trd.get_trade_hist_interval(date_str)  # 提高运行效率，只运行一次
     try:
         data = stock_hist_cache(code, date_start, None, is_cache, 'qfq')
         if data is not None:
             data.loc[:, 'p_change'] = tl.ROC(data['close'].values, 1)
-            data['p_change'].values[np.isnan(data['p_change'].values)] = 0.0
+            data['p_change'] = data['p_change'].fillna(0.0)
             data["volume"] = data['volume'].values.astype('double') * 100  # 成交量单位从手变成股。
         return data
     except Exception as e:
@@ -394,7 +356,6 @@ def stock_hist_cache(code, date_start, date_end=None, is_cache=True, adjust=''):
                     stock.to_pickle(cache_file, compression="gzip")
             except Exception:
                 pass
-            # time.sleep(1)
             return stock
     except Exception as e:
         logging.error(f"stockfetch.stock_hist_cache处理异常：{code}代码{e}")

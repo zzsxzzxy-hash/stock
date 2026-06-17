@@ -26,6 +26,8 @@ import instock.lib.database as mdb
 import instock.lib.version as version
 import instock.web.dataTableHandler as dataTableHandler
 import instock.web.dataIndicatorsHandler as dataIndicatorsHandler
+import instock.web.syncHandler as syncHandler
+import instock.web.apiHandler as apiHandler
 import instock.web.base as webBase
 
 __author__ = 'myh '
@@ -35,16 +37,28 @@ __date__ = '2023/3/10 '
 class Application(tornado.web.Application):
     def __init__(self):
         handlers = [
-            # 设置路由
+            # ── Vue3 SPA 入口（/app/* 全部返回 index.html）──────────────────
+            (r"/app(?:/.*)?", VueSPAHandler),
+
+            # ── 旧版 Tornado 模板路由（保持兼容）──────────────────────────────
             (r"/", HomeHandler),
             (r"/instock/", HomeHandler),
-            # 使用datatable 展示报表数据模块。
             (r"/instock/api_data", dataTableHandler.GetStockDataHandler),
             (r"/instock/data", dataTableHandler.GetStockHtmlHandler),
-            # 获得股票指标数据。
             (r"/instock/data/indicators", dataIndicatorsHandler.GetDataIndicatorsHandler),
-            # 加入关注
             (r"/instock/control/attention", dataIndicatorsHandler.SaveCollectHandler),
+            (r"/instock/sync", syncHandler.SyncPageHandler),
+            (r"/instock/api/sync", syncHandler.SyncApiHandler),
+            (r"/instock/api/sync/status", syncHandler.SyncStatusApiHandler),
+            (r"/instock/api/sync/log", syncHandler.SyncLogSSEHandler),
+
+            # ── Vue3 REST API ──────────────────────────────────────────────
+            (r"/api/meta",        apiHandler.ApiMetaHandler),
+            (r"/api/data",        apiHandler.ApiDataHandler),
+            (r"/api/trade_date",  apiHandler.ApiTradeDateHandler),
+            (r"/api/watchlist",   apiHandler.ApiWatchlistHandler),
+            (r"/api/custom_strategy", apiHandler.ApiCustomStrategyHandler),
+            (r"/instock/api_data/kline", apiHandler.ApiKlineHandler),
         ]
         settings = dict(  # 配置
             template_path=os.path.join(os.path.dirname(__file__), "templates"),
@@ -57,6 +71,20 @@ class Application(tornado.web.Application):
         super(Application, self).__init__(handlers, **settings)
         # Have one global connection to the blog DB across all handlers
         self.db = torndb.Connection(**mdb.MYSQL_CONN_TORNDB)
+
+
+# Vue3 SPA Handler：所有 /app/* 请求返回 Vue 构建产物的 index.html
+class VueSPAHandler(webBase.BaseHandler, ABC):
+    def get(self):
+        dist_index = os.path.join(os.path.dirname(__file__), "static", "dist", "index.html")
+        if os.path.exists(dist_index):
+            with open(dist_index, 'r', encoding='utf-8') as f:
+                content = f.read()
+            self.set_header('Content-Type', 'text/html; charset=utf-8')
+            self.write(content)
+        else:
+            self.set_status(404)
+            self.write("Vue3 前端尚未构建，请先执行 npm run build")
 
 
 # 首页handler。

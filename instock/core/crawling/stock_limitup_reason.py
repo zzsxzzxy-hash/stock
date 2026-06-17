@@ -1,123 +1,66 @@
 #!/usr/bin/env python
 # -*- coding:utf-8 -*-
 """
-Date: 2025/2/26 12:18
-Desc: 同花顺涨停原因
-http://zx.10jqka.com.cn/event/api/getharden/date/2025-02-21/orderby/date/orderway/desc/charset/GBK/
+涨停原因数据（已重构为Tushare API，彻底移除同花顺爬虫）
+Tushare接口: kpl_list（需要一定积分）
 """
-
+import logging
 import pandas as pd
-import requests
-import re
 import numpy as np
-from instock.core.singleton_proxy import proxys
 
 __author__ = 'myh '
-__date__ = '2025/5/9 '
+__date__ = '2025/12/31 '
+
 
 def stock_limitup_reason(date: str = "2025-02-27") -> pd.DataFrame:
     """
-    同花顺涨停原因
-    http://zx.10jqka.com.cn/event/api/getharden/date/2025-02-27/orderby/date/orderway/desc/charset/GBK/
-    :return: 涨停原因
-    :rtype: pandas.DataFrame
+    涨停原因（Tushare kpl_list 接口）
+    :param date: 交易日 YYYY-MM-DD 格式
+    :return: 涨停原因 DataFrame
+    列: 日期, 代码, 名称, 原因, 详因, 最新价, 涨跌幅, 涨跌额, 换手率, 成交量, 成交额, DDE
     """
-    url = f"http://zx.10jqka.com.cn/event/api/getharden/date/{date}/orderby/date/orderway/desc/charset/GBK/"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/81.0.4044.138 Safari/537.36 Thx"
-    }
-    r = requests.get(url, proxies = proxys().get_proxies(), headers=headers)
-    data_json = r.json()
+    try:
+        from instock.core.crawling.tushare_data import tushare_data
+        if not tushare_data.is_available():
+            return pd.DataFrame()
 
-    data = data_json["data"]
-    if not data:
+        trade_dt = date.replace('-', '')
+        df = tushare_data.pro.kpl_list(trade_date=trade_dt, tag='涨停')
+        if df is None or df.empty:
+            return pd.DataFrame()
+
+        def _extract_symbol(ts_code):
+            return ts_code.split('.')[0] if '.' in str(ts_code) else str(ts_code)
+
+        def _safe(col, default=0):
+            if col in df.columns:
+                return pd.to_numeric(df[col], errors='coerce').fillna(default)
+            return pd.Series([default] * len(df), index=df.index)
+
+        # 原因优先用 theme，详因用 lu_desc
+        reason = df['theme'] if 'theme' in df.columns else pd.Series([''] * len(df), index=df.index)
+        detail = df['lu_desc'] if 'lu_desc' in df.columns else pd.Series([''] * len(df), index=df.index)
+
+        result = pd.DataFrame({
+            '日期':   pd.to_datetime(df['trade_date']).dt.date,
+            '代码':   df['ts_code'].apply(_extract_symbol),
+            '名称':   df['name'] if 'name' in df.columns else '',
+            '原因':   reason,
+            '详因':   detail,
+            '最新价': _safe('pct_chg', 0) * 0,   # kpl_list 无单独收盘价字段，填0
+            '涨跌幅': _safe('pct_chg'),
+            '涨跌额': np.nan,
+            '换手率': _safe('turnover_rate'),
+            '成交量': np.nan,
+            '成交额': _safe('amount'),
+            'DDE':   np.nan,
+        })
+        return result
+    except Exception as e:
+        logging.error(f"stock_limitup_reason处理异常: {e}")
         return pd.DataFrame()
 
-    temp_df = pd.DataFrame(data)
-    if len(temp_df.columns)<7:
-        temp_df.columns = [
-            "ID",
-            "名称",
-            "代码",
-            "原因",
-            "日期",
-            "_",
-        ]
-        temp_df["最新价"] = np.nan
-        temp_df["涨跌额"] = np.nan
-        temp_df["涨跌幅"] = np.nan
-        temp_df["换手率"] = np.nan
-        temp_df["成交额"] = np.nan
-        temp_df["成交量"] = np.nan
-        temp_df["DDE"] = np.nan
-    else:
-        temp_df.columns = [
-            "ID",
-            "名称",
-            "代码",
-            "原因",
-            "日期",
-            "最新价",
-            "涨跌额",
-            "涨跌幅",
-            "换手率",
-            "成交额",
-            "成交量",
-            "DDE",
-            "_",
-        ]
-
-    temp_df["详因"] = temp_df.apply(stock_limitup_detail, axis=1)
-    temp_df["换手率"] = round(temp_df["换手率"], 2)
-    temp_df = temp_df[
-        [
-            "日期",
-            "代码",
-            "名称",
-            "原因",
-            "详因",
-            "最新价",
-            "涨跌幅",
-            "涨跌额",
-            "换手率",
-            "成交量",
-            "成交额",
-            "DDE",
-        ]
-    ]
-
-    return temp_df
-
-
-def stock_limitup_detail(row):
-    """
-    同花顺涨停详因
-    http://zx.10jqka.com.cn/event/harden/stockreason/id/70870005
-    :return: 涨停详因
-    :rtype: pandas.DataFrame
-    """
-    url = f"http://zx.10jqka.com.cn/event/harden/stockreason/id/{row['ID']}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/89.0.4389.82 Safari/537.36"
-    }
-    r = requests.get(url, proxies = proxys().get_proxies(), headers=headers)
-    data_text = r.text
-
-    # match_title = re.search(r"var title = '(.*?)';", data_text)
-    # _title = ""
-    # if match_title:
-    #     _title = match_title.group(1)
-
-    pattern_data = re.search(r"var data = '(.*?)';", data_text)
-    _data = ""
-    if pattern_data:
-        _data = pattern_data.group(1).replace("&lt;spanclass=&quot;hl&quot;&gt;", "").replace("&lt;/span&gt;", "").replace("&amp;quot;", "\"")
-    return _data
-
-    # reason = f"{_title}\r\n{_data}"
-
-    # return reason
 
 if __name__ == "__main__":
-    stock_limitup_reason_df = stock_limitup_reason()
-    print(stock_limitup_reason_df)
+    df = stock_limitup_reason(date="2026-06-16")
+    print(df)

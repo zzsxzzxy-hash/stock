@@ -1,0 +1,333 @@
+{% extends "layout/default.html" %}
+
+{% block main_content %}
+<style>
+/* ── 整体布局 ── */
+.sync-page { padding: 20px; }
+.sync-group { margin-bottom: 30px; }
+.sync-group-title {
+    font-size: 15px; font-weight: bold; color: #555;
+    border-left: 4px solid #307ECC; padding-left: 10px; margin-bottom: 15px;
+}
+.sync-cards { display: flex; flex-wrap: wrap; gap: 15px; }
+
+/* ── 卡片 ── */
+.sync-card {
+    background: #fff; border: 1px solid #e0e0e0; border-radius: 6px;
+    padding: 16px 18px; width: 360px;
+    box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+    display: flex; flex-direction: column; gap: 8px;
+    transition: box-shadow .2s;
+}
+.sync-card.running { border-color: #f0ad4e; box-shadow: 0 0 0 2px rgba(240,173,78,.25); }
+.sync-card.success { border-color: #5cb85c; }
+.sync-card.error   { border-color: #d9534f; }
+
+.sync-card-header { display: flex; align-items: center; gap: 10px; }
+.sync-card-icon {
+    width: 34px; height: 34px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px; color: #fff; flex-shrink: 0;
+}
+.sync-card-name { font-size: 14px; font-weight: bold; color: #333; }
+.sync-card-desc { font-size: 12px; color: #888; line-height: 1.5; }
+
+/* ── 日期选择行 ── */
+.sync-date-row {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    background: #f8f9fa; border-radius: 4px; padding: 6px 8px;
+}
+.sync-date-row label { font-size: 12px; color: #666; white-space: nowrap; }
+.sync-date-row input[type=date] {
+    font-size: 12px; padding: 3px 6px; border: 1px solid #ccc;
+    border-radius: 3px; color: #333; background: #fff; height: 26px;
+    width: 130px;
+}
+.sync-date-row .date-sep { font-size: 12px; color: #999; }
+.sync-date-single { display: flex; align-items: center; gap: 6px; }
+
+/* ── 底部操作行 ── */
+.sync-card-footer {
+    display: flex; align-items: center; justify-content: space-between; margin-top: 2px;
+}
+.sync-status {
+    font-size: 11px; padding: 2px 8px; border-radius: 10px; font-weight: bold;
+}
+.sync-status.idle    { background: #f0f0f0; color: #999; }
+.sync-status.running { background: #fff3cd; color: #856404; }
+.sync-status.success { background: #d4edda; color: #155724; }
+.sync-status.error   { background: #f8d7da; color: #721c24; }
+.sync-time { font-size: 11px; color: #aaa; margin-left: 6px; }
+
+.btn-sync {
+    padding: 5px 14px; font-size: 13px; border-radius: 4px;
+    border: none; color: #fff; cursor: pointer; transition: opacity .2s;
+}
+.btn-sync:disabled { opacity: .55; cursor: not-allowed; }
+
+/* ── 实时日志面板 ── */
+.sync-log-panel {
+    display: none;
+    background: #1a1d23; border-radius: 4px;
+    padding: 8px 10px; max-height: 200px; overflow-y: auto;
+    font-family: 'Courier New', monospace; font-size: 11px;
+    line-height: 1.6; color: #c9d1d9;
+    border: 1px solid #30363d;
+}
+.sync-log-panel .log-line { white-space: pre-wrap; word-break: break-all; }
+.sync-log-panel .log-ok   { color: #56d364; }
+.sync-log-panel .log-err  { color: #f85149; }
+.sync-log-panel .log-info { color: #79c0ff; }
+.btn-log-toggle {
+    font-size: 11px; color: #aaa; background: none; border: none;
+    cursor: pointer; padding: 0; text-decoration: underline;
+}
+.btn-log-toggle:hover { color: #333; }
+
+/* ── 一键同步栏 ── */
+.sync-all-bar {
+    margin-bottom: 24px; display: flex; align-items: center; gap: 15px; flex-wrap: wrap;
+}
+.btn-sync-all {
+    padding: 7px 22px; font-size: 14px; background: #307ECC;
+    color: #fff; border: none; border-radius: 4px; cursor: pointer;
+}
+.btn-sync-all:hover { background: #2568a8; }
+.sync-all-tip { font-size: 12px; color: #aaa; }
+</style>
+
+<div class="sync-page">
+    <div class="sync-all-bar">
+        <button class="btn-sync-all" onclick="syncAll()">
+            <i class="fa fa-refresh"></i>&nbsp; 一键同步全部
+        </button>
+        <span class="sync-all-tip">每张卡片可独立选择日期范围再执行同步；状态每 3 秒自动刷新</span>
+    </div>
+
+    {% for group_name, jobs in groups.items() %}
+    <div class="sync-group">
+        <div class="sync-group-title">{{ group_name }}</div>
+        <div class="sync-cards">
+            {% for job in jobs %}
+            <div class="sync-card" id="card-{{ job['key'] }}">
+                <!-- 标题 -->
+                <div class="sync-card-header">
+                    <div class="sync-card-icon" style="background:{{ job['color'] }};">
+                        <i class="fa {{ job['icon'] }}"></i>
+                    </div>
+                    <span class="sync-card-name">{{ job['name'] }}</span>
+                </div>
+                <div class="sync-card-desc">{{ job['desc'] }}</div>
+
+                <!-- 日期选择 -->
+                <div class="sync-date-row">
+                    <label>日期：</label>
+                    <input type="date" id="start-{{ job['key'] }}" value="{{ today }}" max="{{ today }}">
+                    <span class="date-sep">→</span>
+                    <input type="date" id="end-{{ job['key'] }}"   value="{{ today }}" max="{{ today }}">
+                    <button class="btn-log-toggle" onclick="setDateToday('{{ job['key'] }}')">今日</button>
+                </div>
+
+                <!-- 底部 -->
+                <div class="sync-card-footer">
+                    <div>
+                        <span class="sync-status idle" id="status-{{ job['key'] }}">未执行</span>
+                        <span class="sync-time" id="time-{{ job['key'] }}"></span>
+                    </div>
+                    <div style="display:flex;gap:8px;align-items:center;">
+                        <button class="btn-log-toggle" id="logtoggle-{{ job['key'] }}"
+                                onclick="toggleLog('{{ job['key'] }}')" style="display:none;">
+                            展开日志
+                        </button>
+                        <button class="btn-sync"
+                                style="background:{{ job['color'] }};"
+                                id="btn-{{ job['key'] }}"
+                                onclick="syncJob('{{ job['key'] }}')">
+                            <i class="fa fa-play"></i> 同步
+                        </button>
+                    </div>
+                </div>
+
+                <!-- 实时日志面板 -->
+                <div class="sync-log-panel" id="log-{{ job['key'] }}"></div>
+            </div>
+            {% end %}
+        </div>
+    </div>
+    {% end %}
+</div>
+
+<script>
+const JOB_KEYS = [{% for group_name, jobs in groups.items() %}{% for job in jobs %}'{{ job["key"] }}',{% end %}{% end %}];
+const TODAY = '{{ today }}';
+
+// ── 日期快捷 ──────────────────────────────────────────────────
+function setDateToday(key) {
+    document.getElementById('start-' + key).value = TODAY;
+    document.getElementById('end-' + key).value   = TODAY;
+}
+
+// ── 日志面板展开/收起 ──────────────────────────────────────────
+function toggleLog(key) {
+    var panel = document.getElementById('log-' + key);
+    var btn   = document.getElementById('logtoggle-' + key);
+    if (panel.style.display === 'block') {
+        panel.style.display = 'none';
+        btn.textContent = '展开日志';
+    } else {
+        panel.style.display = 'block';
+        btn.textContent = '收起日志';
+        panel.scrollTop = panel.scrollHeight;
+    }
+}
+
+// ── 追加日志行 ────────────────────────────────────────────────
+function appendLog(key, text) {
+    var panel = document.getElementById('log-' + key);
+    if (!panel) return;
+    var div = document.createElement('div');
+    div.className = 'log-line';
+    if (text.startsWith('✅') || text.startsWith('▶')) {
+        div.classList.add('log-ok');
+    } else if (text.startsWith('❌') || text.toLowerCase().includes('error') || text.toLowerCase().includes('失败')) {
+        div.classList.add('log-err');
+    } else if (text.toLowerCase().includes('warning') || text.includes('WARNING')) {
+        div.classList.add('log-info');
+    }
+    div.textContent = text;
+    panel.appendChild(div);
+    // 自动滚到底
+    if (panel.style.display === 'block') {
+        panel.scrollTop = panel.scrollHeight;
+    }
+}
+
+function clearLog(key) {
+    var panel = document.getElementById('log-' + key);
+    if (panel) panel.innerHTML = '';
+}
+
+// ── SSE 实时日志连接 ──────────────────────────────────────────
+var _sseMap = {};
+
+function startSSE(key) {
+    // 关闭旧连接
+    if (_sseMap[key]) {
+        try { _sseMap[key].close(); } catch(e) {}
+        delete _sseMap[key];
+    }
+
+    // 打开日志面板
+    var panel = document.getElementById('log-' + key);
+    var toggleBtn = document.getElementById('logtoggle-' + key);
+    if (panel) { panel.style.display = 'block'; }
+    if (toggleBtn) { toggleBtn.style.display = 'inline'; toggleBtn.textContent = '收起日志'; }
+
+    var es = new EventSource('/instock/api/sync/log?key=' + encodeURIComponent(key));
+    _sseMap[key] = es;
+
+    es.onmessage = function(e) {
+        if (e.data === '__DONE__') {
+            es.close();
+            delete _sseMap[key];
+            return;
+        }
+        appendLog(key, e.data);
+    };
+
+    es.onerror = function() {
+        appendLog(key, '── 连接已关闭 ──');
+        es.close();
+        delete _sseMap[key];
+    };
+}
+
+// ── 触发单个同步 ──────────────────────────────────────────────
+function syncJob(key) {
+    var btn = document.getElementById('btn-' + key);
+    if (btn && btn.disabled) return;
+    if (btn) btn.disabled = true;
+
+    var startDate = document.getElementById('start-' + key).value;
+    var endDate   = document.getElementById('end-'   + key).value;
+
+    setStatus(key, 'running', '执行中…', '');
+    clearLog(key);
+
+    fetch('/instock/api/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ key: key, start_date: startDate, end_date: endDate })
+    })
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+        if (data.status === 'error') {
+            setStatus(key, 'error', data.message, '');
+            if (btn) btn.disabled = false;
+            return;
+        }
+        // 无论 started / running 都建立 SSE
+        startSSE(key);
+    })
+    .catch(function(err) {
+        setStatus(key, 'error', '请求失败：' + err, '');
+        if (btn) btn.disabled = false;
+    });
+}
+
+// ── 一键同步（用各自当前日期设置） ────────────────────────────
+function syncAll() {
+    JOB_KEYS.forEach(function(key) {
+        var btn = document.getElementById('btn-' + key);
+        if (!btn || !btn.disabled) {
+            syncJob(key);
+        }
+    });
+}
+
+// ── 状态徽章更新 ──────────────────────────────────────────────
+function setStatus(key, status, text, time) {
+    var el  = document.getElementById('status-' + key);
+    var tel = document.getElementById('time-'   + key);
+    var card = document.getElementById('card-'  + key);
+    if (el) {
+        el.className = 'sync-status ' + status;
+        var labels = { idle: '未执行', running: '执行中', success: '成功', error: '失败' };
+        el.textContent = text || labels[status] || status;
+    }
+    if (tel && time) tel.textContent = time;
+    if (card) {
+        card.classList.remove('running', 'success', 'error');
+        if (status !== 'idle') card.classList.add(status);
+    }
+}
+
+// ── 轮询所有任务状态（3 秒） ──────────────────────────────────
+function pollStatus() {
+    fetch('/instock/api/sync/status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            JOB_KEYS.forEach(function(key) {
+                var info = data[key];
+                if (!info) return;
+                var timeStr = info.end_time
+                    ? ('完成：' + info.end_time)
+                    : ('开始：' + info.start_time);
+                setStatus(key, info.status, info.message, timeStr);
+
+                var btn = document.getElementById('btn-' + key);
+                if (btn) btn.disabled = (info.status === 'running');
+
+                // 若任务已结束（非 running），确保 SSE 也关闭
+                if (info.status !== 'running' && _sseMap[key]) {
+                    // SSE 自己会收到 __DONE__ 关闭，无需强制处理
+                }
+            });
+        })
+        .catch(function() {});
+}
+
+pollStatus();
+setInterval(pollStatus, 3000);
+</script>
+{% end %}
