@@ -459,3 +459,65 @@ class ApiCustomStrategyHandler(webBase.BaseHandler, ABC):
             self.set_status(500)
             self.write(json.dumps({'error': str(e)}, ensure_ascii=False))
 
+
+class ApiSinaRealtimeHandler(webBase.BaseHandler, ABC):
+    """
+    新浪财经实时行情代理
+    GET /api/sina_realtime?codes=000001,000002,...
+    返回: { "000001": { price, change, change_pct, volume, amount }, ... }
+    """
+    @gen.coroutine
+    def get(self):
+        import requests as _req
+        codes_str = self.get_argument('codes', '')
+        if not codes_str:
+            self.write(json.dumps({}))
+            return
+        try:
+            codes = [c.strip() for c in codes_str.split(',') if c.strip()]
+            # 转换为新浪格式: 6/9开头 → s_sh, 其余 → s_sz
+            sina_codes = []
+            for c in codes:
+                if c.startswith(('6', '9')):
+                    sina_codes.append(f"s_sh{c}")
+                else:
+                    sina_codes.append(f"s_sz{c}")
+
+            url = f"http://hq.sinajs.cn/list={','.join(sina_codes)}"
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                "Referer": "https://finance.sina.com.cn/",
+            }
+            resp = _req.get(url, headers=headers, timeout=8)
+            resp.encoding = 'gbk'
+
+            result = {}
+            for line in resp.text.strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    var_part, data_part = line.split('=', 1)
+                    # 提取6位代码
+                    key = var_part.strip()  # e.g. var hq_str_s_sh688802
+                    code = key[-6:]         # 末6位即股票代码
+                    data = data_part.strip().strip('";').strip('"')
+                    fields = data.split(',')
+                    if len(fields) >= 6:
+                        result[code] = {
+                            'name':       fields[0],
+                            'price':      float(fields[1]) if fields[1] else None,
+                            'change':     float(fields[2]) if fields[2] else None,
+                            'change_pct': float(fields[3]) if fields[3] else None,
+                            'volume':     int(fields[4])   if fields[4] else None,
+                            'amount':     float(fields[5]) * 10 if fields[5] else None,  # 新浪返回万元，转为千元(与数据库一致)
+                        }
+                except Exception:
+                    continue
+
+            self.set_header('Content-Type', 'application/json; charset=utf-8')
+            self.write(json.dumps(result, ensure_ascii=False))
+        except Exception as e:
+            self.set_status(500)
+            self.write(json.dumps({'error': str(e)}, ensure_ascii=False))
+

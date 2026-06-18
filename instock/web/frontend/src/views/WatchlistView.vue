@@ -208,17 +208,20 @@ function fmt2(v) {
 function fmtVol(v) {
   const n = Number(v)
   if (!v || isNaN(n)) return '—'
-  if (n >= 1e8) return (n / 1e8).toFixed(2) + '亿'
-  if (n >= 1e4) return (n / 1e4).toFixed(2) + '万'
-  return n.toString()
+  // v 单位: 手(100股)
+  if (n >= 1e8) return (n / 1e8).toFixed(2) + '亿手'
+  if (n >= 1e4) return (n / 1e4).toFixed(2) + '万手'
+  return n.toLocaleString() + '手'
 }
 
 function fmtAmt(v) {
   const n = Number(v)
   if (!v || isNaN(n)) return '—'
-  if (n >= 1e8) return (n / 1e8).toFixed(2) + '亿'
-  if (n >= 1e4) return (n / 1e4).toFixed(2) + '万'
-  return n.toString()
+  // v 单位: 千元，转为元显示
+  const yuan = n * 1000
+  if (yuan >= 1e8) return (yuan / 1e8).toFixed(2) + '亿'
+  if (yuan >= 1e4) return (yuan / 1e4).toFixed(2) + '万'
+  return yuan.toLocaleString() + '元'
 }
 
 function fmtDatetime(v) {

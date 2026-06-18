@@ -242,11 +242,18 @@ function formatCell(prop, val) {
   const floatProps = ['change_rate', 'ups_downs', 'new_price', 'turnoverrate',
     'volume_ratio', 'open_price', 'high_price', 'low_price', 'pe', 'pb', 'amplitude']
   if (floatProps.includes(prop) && !isNaN(val)) return parseFloat(val).toFixed(2)
-  if (['volume', 'deal_amount', 'total_market_cap', 'free_cap'].includes(prop)) {
+  if (['volume', 'total_market_cap', 'free_cap'].includes(prop)) {
     const n = Number(val)
     if (n >= 1e8)  return (n / 1e8).toFixed(2)  + '亿'
     if (n >= 1e4)  return (n / 1e4).toFixed(2)  + '万'
     return n.toLocaleString()
+  }
+  if (prop === 'deal_amount') {
+    // deal_amount 单位: 千元，转为元显示
+    const yuan = Number(val) * 1000
+    if (yuan >= 1e8)  return (yuan / 1e8).toFixed(2)  + '亿'
+    if (yuan >= 1e4)  return (yuan / 1e4).toFixed(2)  + '万'
+    return yuan.toLocaleString() + '元'
   }
   return val
 }

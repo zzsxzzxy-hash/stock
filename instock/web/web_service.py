@@ -58,6 +58,7 @@ class Application(tornado.web.Application):
             (r"/api/trade_date",  apiHandler.ApiTradeDateHandler),
             (r"/api/watchlist",   apiHandler.ApiWatchlistHandler),
             (r"/api/custom_strategy", apiHandler.ApiCustomStrategyHandler),
+            (r"/api/sina_realtime",   apiHandler.ApiSinaRealtimeHandler),
             (r"/instock/api_data/kline", apiHandler.ApiKlineHandler),
         ]
         settings = dict(  # 配置
