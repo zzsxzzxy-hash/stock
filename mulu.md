@@ -97,8 +97,8 @@ instock/
 │   └── __init__.py
 │
 ├── lib/                          # 基础库
-│   ├── database.py               # 数据库连接与操作（PyMySQL+SQLAlchemy，增删改查/批量入库/表检查）
-│   ├── torndb.py                 # Tornado数据库封装（轻量级PyMySQL包装，供Web层使用）
+│   ├── database.py               # 数据库连接与操作（PostgreSQL/psycopg2+SQLAlchemy，增删改查/批量入库/表检查）
+│   ├── torndb.py                 # Tornado数据库封装（轻量级psycopg2包装，供Web层使用）
 │   ├── trade_time.py             # 交易日判断（是否交易日/上一交易日/交易时段判断）
 │   ├── run_template.py           # 作业运行模板（解析命令行日期参数，支持单日/批量/区间执行）
 │   ├── singleton_type.py         # 单例模式元类（线程安全，基于RLock双重检查）
@@ -155,8 +155,8 @@ cron/                             # 定时任务配置（Docker容器内使用�
     └── run_monthly               # 每月执行（周三/周六10:30，清除历史缓存数据）
 
 docker/                           # Docker部署配置
-├── Dockerfile                    # 镜像构建（Python3.11+TA-Lib+所有依赖+cron配置）
-├── docker-compose.yml            # 容器编排（MariaDB + InStock服务）
+├── Dockerfile                    # 镜像构建（Python3.11+TA-Lib+PostgreSQL/Redis依赖+cron配置）
+├── docker-compose.yml            # 容器编排（PostgreSQL + Redis + InStock服务）
 ├── build.sh                      # 构建脚本（rsync代码+docker build+push镜像）
 ├── .dockerignore                 # Docker构建忽略文件
 └── .gitignore                    # Git忽略文件
@@ -181,11 +181,11 @@ img/                              # 项目截图
 数据源层                    处理层                     存储层                 展示层
 ─────────                  ──────                     ──────                 ──────
 Tushare API ───┐
-  (主要数据源)  │           stockfetch.py ──→ MySQL ──→ web_service.py
-新浪财经 ──────┤           indicator/     ──→ MySQL ──→ dataTableHandler.py
-同花顺 ────────┤   ──→     pattern/       ──→ MySQL ──→ dataIndicatorsHandler.py
-通达信 ────────┘           strategy/      ──→ MySQL ──→ Bokeh K线图
-                           backtest/      ──→ MySQL
+  (主要数据源)  │           stockfetch.py ──→ PostgreSQL ──→ web_service.py
+新浪财经 ──────┤           indicator/     ──→ PostgreSQL ──→ dataTableHandler.py
+同花顺 ────────┤   ──→     pattern/       ──→ PostgreSQL ──→ dataIndicatorsHandler.py
+通达信 ────────┘           strategy/      ──→ PostgreSQL ──→ Bokeh K线图
+                           backtest/      ──→ PostgreSQL
 ```
 
 > **数据源说明**：项目已从东方财富网爬虫全面重构为 Tushare API 数据源。`tushare_data.py` 作为核心封装层，

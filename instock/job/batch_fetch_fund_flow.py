@@ -46,7 +46,7 @@ def get_trade_dates(start: str, end: str) -> list[str]:
 def already_done(date_iso: str) -> bool:
     """该交易日是否已有完整数据（>100条且name非空）"""
     r = mdb.executeSqlFetch(
-        "SELECT COUNT(*) cnt FROM `cn_stock_fund_flow` WHERE date=%s AND name != '' AND name IS NOT NULL",
+        'SELECT COUNT(*) cnt FROM "cn_stock_fund_flow" WHERE date=%s AND name != \'\'  AND name IS NOT NULL',
         (date_iso,)
     )
     return bool(r and r[0][0] > 100)
@@ -167,12 +167,12 @@ def fetch_one_day(trade_date_8: str, stock_basic: pd.DataFrame) -> pd.DataFrame 
 
 
 def save_day(df: pd.DataFrame, date_iso: str):
-    """删旧数据后 INSERT IGNORE 写入"""
-    mdb.executeSql(f"DELETE FROM `{TABLE}` WHERE `date`='{date_iso}'")
+    """删旧数据后 INSERT ON CONFLICT DO NOTHING 写入"""
+    mdb.executeSql(f'DELETE FROM "{TABLE}" WHERE "date"=\'{date_iso}\'')
     cols = df.columns.tolist()
-    col_names = ', '.join(f'`{c}`' for c in cols)
+    col_names = ', '.join(f'"{c}"' for c in cols)
     placeholders = ', '.join(['%s'] * len(cols))
-    sql = f"INSERT IGNORE INTO `{TABLE}` ({col_names}) VALUES ({placeholders})"
+    sql = f'INSERT INTO "{TABLE}" ({col_names}) VALUES ({placeholders}) ON CONFLICT DO NOTHING'
     rows = [tuple(r) for r in df.itertuples(index=False, name=None)]
     with mdb.get_connection() as conn:
         with conn.cursor() as cur:

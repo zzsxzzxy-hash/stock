@@ -18,7 +18,11 @@ __date__ = '2023/3/10 '
 class MyEncoder(json.JSONEncoder):
 
     def default(self, obj):
-        if isinstance(obj, bytes):
+        if isinstance(obj, bool):
+            # PostgreSQL BOOLEAN → Python bool
+            return "是" if obj else "否"
+        elif isinstance(obj, bytes):
+            # 兼容旧 MySQL BIT 字段（迁移后理论上不再出现）
             return "是" if ord(obj) == 1 else "否"
         elif isinstance(obj, datetime.datetime):
             return obj.strftime('%Y-%m-%d %H:%M:%S')
@@ -54,8 +58,8 @@ class GetStockDataHandler(webBase.BaseHandler, ABC):
         if date is None:
             where = ""
         else:
-            # where = f" WHERE `date` = '{date}'"
-            where = f" WHERE `date` = %s"
+            # where = f" WHERE "date" = '{date}'"
+            where = ' WHERE "date" = %s'
 
         order_by = ""
         if web_module_data.order_by is not None:

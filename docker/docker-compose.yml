@@ -1,13 +1,32 @@
-version: '4.0.0'
-
 services:
   instockdbservice:
-    image: library/mariadb:latest
-    container_name: InStockDbService
+    image: postgres:16
+    container_name: InStockPostgres
     environment:
-      MYSQL_ROOT_PASSWORD: root
+      POSTGRES_USER: instock
+      POSTGRES_PASSWORD: instock
+      POSTGRES_DB: instockdb
     volumes:
-      - /data/mariadb/data:/var/lib/instockdb
+      - instock_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U instock -d instockdb"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - instock_network
+
+  instockredis:
+    image: redis:7-alpine
+    container_name: InStockRedis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - instock_redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - instock_network
 
@@ -17,15 +36,30 @@ services:
     ports:
       - "9988:9988"
     environment:
-      db_host: InStockDbService
+      db_host: instockdbservice
+      db_port: 5432
+      db_user: instock
+      db_password: instock
+      db_database: instockdb
+      REDIS_HOST: instockredis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      redis_host: instockredis
+      redis_port: 6379
     volumes:
       - /data/instockproxy.txt:/data/InStock/instock/config/proxy.txt
     depends_on:
-      - instockdbservice
+      instockdbservice:
+        condition: service_healthy
+      instockredis:
+        condition: service_healthy
     networks:
       - instock_network
+
+volumes:
+  instock_pgdata:
+  instock_redisdata:
 
 networks:
   instock_network:
     driver: bridge
-

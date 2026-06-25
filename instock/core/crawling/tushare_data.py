@@ -630,7 +630,7 @@ class TushareData:
     def get_stock_selection(self):
         """
         综合选股（兼容东方财富stock_selection输出格式）
-        Tushare接口: stock_basic + daily_basic
+        Tushare接口: stock_basic + daily + daily_basic + fina_indicator
         返回与TABLE_CN_STOCK_SELECTION列数一致的DataFrame
         """
         if not self.is_available():
@@ -642,56 +642,91 @@ class TushareData:
             if stock_list is None or stock_list.empty:
                 return pd.DataFrame()
 
-            # 获取最新日线指标
-            trade_date = datetime.datetime.now().strftime('%Y%m%d')
-            daily_basic = self.pro.daily_basic(trade_date=trade_date,
-                                               fields='ts_code,close,turnover_rate,pe,pb,dv_ratio,total_mv,circ_mv')
-            if daily_basic is None or daily_basic.empty:
-                yesterday = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime('%Y%m%d')
-                daily_basic = self.pro.daily_basic(trade_date=yesterday,
-                                                   fields='ts_code,close,turnover_rate,pe,pb,dv_ratio,total_mv,circ_mv')
-
-            if daily_basic is None or daily_basic.empty:
+            # 获取最新交易日
+            trade_date = self._get_latest_trade_date_with_data()
+            if not trade_date:
                 return pd.DataFrame()
 
-            merged = stock_list.merge(daily_basic, on='ts_code', how='inner')
-            merged['symbol'] = merged['ts_code'].apply(self._extract_symbol)
+            # 获取日线行情
+            daily = self.pro.daily(trade_date=trade_date,
+                                   fields='ts_code,open,high,low,close,pre_close,change,pct_chg,vol,amount')
+            if daily is None or daily.empty:
+                return pd.DataFrame()
 
-            # 获取表结构列定义
-            from instock.core.tablestructure import TABLE_CN_STOCK_SELECTION
-            table_columns = list(TABLE_CN_STOCK_SELECTION['columns'])
-            col_map = {v['map']: k for k, v in TABLE_CN_STOCK_SELECTION['columns'].items() if 'map' in v}
+            # 获取日线指标
+            daily_basic = self.pro.daily_basic(trade_date=trade_date,
+                                               fields='ts_code,turnover_rate,volume_ratio,pe,pb,dv_ratio,total_mv,circ_mv')
+            if daily_basic is None or daily_basic.empty:
+                daily_basic = pd.DataFrame(columns=['ts_code'])
 
-            # 创建空DataFrame，包含所有列
-
-            row = daily_basic.iloc[0]
-            data_dict = {
-                'SECURITY_CODE': self._extract_symbol(ts_code),
-                'NEW_PRICE': float(row.get('close', 0) or 0),
-                'PE_DYNAMIC': float(row.get('pe', 0) or 0),
-                'PB_NEW': float(row.get('pb', 0) or 0),
-                'DV_RATIO': float(row.get('dv_ratio', 0) or 0),
-                'TOTAL_MARKET_CAP': float(row.get('total_mv', 0) or 0),
-                'CIRC_MARKET_CAP': float(row.get('circ_mv', 0) or 0),
-                'TURNOVERRATE': float(row.get('turnover_rate', 0) or 0),
-            }
-
-            # 获取财务指标
-            fina = self.pro.fina_indicator(ts_code=ts_code)
+            # 获取财务指标（最近一期）
+            fina = self.pro.fina_indicator(
+                fields='ts_code,eps,bps,roe,debt_to_assets,grossprofit_margin,netprofit_yoy,revenue_yoy',
+                start_date=trade_date[:4] + '0101'
+            )
+            fina_latest = None
             if fina is not None and not fina.empty:
-                f = fina.iloc[0]
-                data_dict.update({
-                    'EPS': float(f.get('eps', 0) or 0),
-                    'BPS': float(f.get('bps', 0) or 0),
-                    'GROSSPROFIT_MARGIN': float(f.get('grossprofit_margin', 0) or 0),
-                    'DEBT_TO_ASSETS': float(f.get('debt_to_assets', 0) or 0),
-                    'OR_YOY': float(f.get('or_yoy', 0) or 0),
-                    'NETPROFIT_YOY': float(f.get('netprofit_yoy', 0) or 0),
+                fina_latest = fina.drop_duplicates(subset='ts_code', keep='first')
+
+            # 合并数据
+            merged = stock_list.merge(daily, on='ts_code', how='inner')
+            merged = merged.merge(daily_basic, on='ts_code', how='left')
+            if fina_latest is not None:
+                merged = merged.merge(fina_latest, on='ts_code', how='left')
+
+            # 构建与 TABLE_CN_STOCK_SELECTION 对齐的 DataFrame
+            today = f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}"
+            rows = []
+            for _, row in merged.iterrows():
+                list_date_val = row.get('list_date', '')
+                if list_date_val and str(list_date_val) != 'nan':
+                    ld = str(int(list_date_val)) if isinstance(list_date_val, float) else str(list_date_val)
+                    list_date_fmt = f"{ld[:4]}-{ld[4:6]}-{ld[6:8]}" if len(ld) >= 8 else None
+                else:
+                    list_date_fmt = None
+
+                rows.append({
+                    'date': today,
+                    'code': self._extract_symbol(row['ts_code']),
+                    'name': row.get('name', ''),
+                    'new_price': float(row.get('close', 0) or 0),
+                    'change_rate': float(row.get('pct_chg', 0) or 0),
+                    'volume_ratio': float(row.get('volume_ratio', 0) or 0),
+                    'high_price': float(row.get('high', 0) or 0),
+                    'low_price': float(row.get('low', 0) or 0),
+                    'pre_close_price': float(row.get('pre_close', 0) or 0),
+                    'volume': int(float(row.get('vol', 0) or 0) * 100),  # Tushare单位:手→股
+                    'deal_amount': int(float(row.get('amount', 0) or 0) * 1000),  # Tushare单位:千元→元
+                    'turnoverrate': float(row.get('turnover_rate', 0) or 0),
+                    'listing_date': list_date_fmt,
+                    'industry': row.get('industry', ''),
+                    'area': row.get('area', ''),
+                    'pe9': float(row.get('pe', 0) or 0),
+                    'pbnewmrq': float(row.get('pb', 0) or 0),
+                    'total_market_cap': float(row.get('total_mv', 0) or 0),
+                    'free_cap': float(row.get('circ_mv', 0) or 0),
+                    'zxgxl': float(row.get('dv_ratio', 0) or 0),
+                    'basic_eps': float(row.get('eps', 0) or 0),
+                    'bvps': float(row.get('bps', 0) or 0),
+                    'roe_weight': float(row.get('roe', 0) or 0),
+                    'debt_asset_ratio': float(row.get('debt_to_assets', 0) or 0),
+                    'sale_gpr': float(row.get('grossprofit_margin', 0) or 0),
+                    'netprofit_yoy_ratio': float(row.get('netprofit_yoy', 0) or 0),
+                    'toi_yoy_ratio': float(row.get('revenue_yoy', 0) or 0),
                 })
 
-            return data_dict
+            if not rows:
+                return pd.DataFrame()
+
+            result = pd.DataFrame(rows)
+            from instock.core.tablestructure import TABLE_CN_STOCK_SELECTION
+            expected_cols = list(TABLE_CN_STOCK_SELECTION['columns'])
+            for col in expected_cols:
+                if col not in result.columns:
+                    result[col] = None
+            return result[expected_cols]
         except Exception as e:
-            logging.error(f"Tushare获取操盘必读失败: {e}")
+            logging.error(f"Tushare获取综合选股失败: {e}")
             return None
 
     # ==================== 通用方法 ====================

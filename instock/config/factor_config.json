@@ -1,0 +1,185 @@
+{
+  "A": {
+    "enabled": true,
+    "name": "位置因子",
+    "desc": "用120日最高价(High1)和120日最高收盘价(High2)与昨日收盘价比较，判断股票所处深度低位。",
+    "formula": "High1=120日最高价, High2=120日最高收盘价; 比较 High1/High2 是否 > 昨日收盘×1.2",
+    "thresholds": {
+      "ratio": {
+        "value": 1.2,
+        "label": "低位判断倍数：High > 昨收 × 此值 视为高点远离"
+      }
+    },
+    "veto": {
+      "enabled": false,
+      "high120_ratio": {
+        "value": 0.95,
+        "label": "滞涨判断：收盘价 > High1 × 此值"
+      },
+      "vol_ratio_min": {
+        "value": 2,
+        "label": "触发否决的最低量比"
+      },
+      "change_max": {
+        "value": 1,
+        "label": "触发否决的最高涨幅(%)"
+      }
+    },
+    "scores": {
+      "score2": {
+        "type": "fixed",
+        "value": 2,
+        "formula": "",
+        "label": "深度低位：High1 > 昨收×ratio 且 High2 > 昨收×ratio"
+      },
+      "score1": {
+        "type": "fixed",
+        "value": 1,
+        "formula": "",
+        "label": "相对低位：High1 > 昨收×ratio 但 High2 ≤ 昨收×ratio"
+      },
+      "score0": {
+        "type": "fixed",
+        "value": 0,
+        "formula": "",
+        "label": "其他（接近或超过高点）"
+      },
+      "other": {
+        "type": "fixed",
+        "value": 0,
+        "formula": "",
+        "label": "数据不足"
+      },
+      "veto": {
+        "type": "fixed",
+        "value": -99,
+        "formula": "",
+        "label": "一票否决（高位巨量滞涨）"
+      }
+    }
+  },
+  "B": {
+    "enabled": true,
+    "name": "买力因子",
+    "desc": "统计盘中每分钟涨跌方向，以涨分钟累计量占全部量的比例衡量主动买入强度，预判后续走势。",
+    "formula": "买力强度 S = 涨分钟累计量 ÷ 全部累计量；分钟收盘>上分钟收盘算涨分钟",
+    "thresholds": {
+      "strong": {
+        "value": 0.62,
+        "label": "强势买入阈值：S ≥ 此值 → +2分"
+      },
+      "normal": {
+        "value": 0.55,
+        "label": "温和买入阈值：S ≥ 此值 → +1分"
+      },
+      "neutral": {
+        "value": 0.48,
+        "label": "均衡阈值：S ≥ 此值 → 0分，否则 -1分"
+      }
+    },
+    "scores": {
+      "strong": {
+        "type": "fixed",
+        "value": 2,
+        "formula": "",
+        "label": "强势买入（S ≥ strong）"
+      },
+      "normal": {
+        "type": "fixed",
+        "value": 1,
+        "formula": "",
+        "label": "温和买入（normal ≤ S < strong）"
+      },
+      "neutral": {
+        "type": "fixed",
+        "value": 0,
+        "formula": "",
+        "label": "均衡观望（neutral ≤ S < normal）"
+      },
+      "weak": {
+        "type": "fixed",
+        "value": -1,
+        "formula": "",
+        "label": "卖压主导（S < neutral）"
+      }
+    }
+  },
+  "C": {
+    "enabled": true,
+    "name": "量能因子",
+    "desc": "通过虚拟全日量比衡量当前量能爆发程度，并结合拉升质量（涨时放量/跌时缩量）评分。",
+    "formula": "vol_ratio = (今日[09:31..T]累计量 + 昨日[T+1..15:00]剩余量) ÷ 昨日全天量；拉升质量判断最近3分钟涨段vs跌段均量比",
+    "thresholds": {
+      "vol_ratio_th": {
+        "value": 1.5,
+        "label": "量比基准阈值（低于此值不计分）"
+      },
+      "high_ratio": {
+        "value": 2,
+        "label": "高量比阈值（超过此值触发高量比判断）"
+      }
+    },
+    "scores": {
+      "high_good": {
+        "type": "fixed",
+        "value": 2,
+        "formula": "",
+        "label": "高量比 + 良性拉升（vol_ratio ≥ high_ratio 且涨段量 > 跌段量×1.5）"
+      },
+      "high_bad": {
+        "type": "fixed",
+        "value": -1,
+        "formula": "",
+        "label": "高量比 + 可疑拉升（vol_ratio ≥ high_ratio 但涨段量 < 跌段量）"
+      },
+      "normal": {
+        "type": "fixed",
+        "value": 1,
+        "formula": "",
+        "label": "正常放量（vol_ratio_th ≤ vol_ratio < high_ratio）"
+      },
+      "none": {
+        "type": "fixed",
+        "value": 0,
+        "formula": "",
+        "label": "量能不足（vol_ratio < vol_ratio_th）"
+      }
+    }
+  },
+  "D": {
+    "enabled": true,
+    "name": "板块因子",
+    "desc": "统计同板块内其他股票的异动情况，板块共振说明资金在集体流入某赛道。",
+    "formula": "统计同板块内「总分>2的信号股数量」和「板块平均涨幅」",
+    "thresholds": {
+      "signal_count_strong": {
+        "value": 3,
+        "label": "强板块：同板块信号股数量 ≥ 此值"
+      },
+      "avg_change_weak": {
+        "value": 1,
+        "label": "弱板块：板块平均涨幅 > 此值(%)"
+      }
+    },
+    "scores": {
+      "strong": {
+        "type": "fixed",
+        "value": 2,
+        "formula": "",
+        "label": "强板块共振（信号股数 ≥ signal_count_strong）"
+      },
+      "weak": {
+        "type": "fixed",
+        "value": 1,
+        "formula": "",
+        "label": "弱板块共振（板块均涨 > avg_change_weak%）"
+      },
+      "none": {
+        "type": "fixed",
+        "value": 0,
+        "formula": "",
+        "label": "无板块共振"
+      }
+    }
+  }
+}

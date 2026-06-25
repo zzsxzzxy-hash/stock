@@ -19,7 +19,7 @@ log = logging.getLogger(__name__)
 def get_prev_trade_date(date_str: str) -> str | None:
     """从 cn_stock_hist_data 取该股之前最近一个有数据的交易日"""
     r = mdb.executeSqlFetch(
-        "SELECT DISTINCT date FROM `cn_stock_hist_data` WHERE date < %s ORDER BY date DESC LIMIT 1",
+        'SELECT DISTINCT date FROM "cn_stock_hist_data" WHERE date < %s ORDER BY date DESC LIMIT 1',
         (date_str,)
     )
     if r and r[0][0]:
@@ -55,11 +55,11 @@ def prepare_volume_surge(date: datetime.date):
             t.close          AS signal_close,
             t.volume         AS signal_vol,
             y.volume         AS prev_vol,
-            ROUND(t.volume / y.volume, 4)  AS vol_ratio,
+            ROUND(CAST(t.volume AS NUMERIC) / CAST(y.volume AS NUMERIC), 4)  AS vol_ratio,
             t.turnover,
             t.quote_change   AS p_change
-        FROM `cn_stock_hist_data` t
-        JOIN `cn_stock_hist_data` y
+        FROM "cn_stock_hist_data" t
+        JOIN "cn_stock_hist_data" y
             ON y.code = t.code AND y.date = %s
         WHERE t.date = %s
           AND t.volume >= y.volume * 1.9
@@ -82,7 +82,7 @@ def prepare_volume_surge(date: datetime.date):
     if codes:
         placeholders = ','.join(['%s'] * len(codes))
         name_rows = mdb.executeSqlFetch(
-            f"SELECT code, name FROM `cn_stock_spot` WHERE date = %s AND code IN ({placeholders})",
+            f'SELECT code, name FROM "cn_stock_spot" WHERE date = %s AND code IN ({placeholders})',
             (date_str, *codes)
         )
         if name_rows:
@@ -114,18 +114,18 @@ def prepare_volume_surge(date: datetime.date):
     cols_type = tbs.get_field_types(cols_def)
     if not mdb.checkTableIsExist(table_name):
         empty = pd.DataFrame(columns=list(cols_def.keys()))
-        mdb.insert_db_from_df(empty, table_name, cols_type, False, "`date`,`code`")
+        mdb.insert_db_from_df(empty, table_name, cols_type, False, '"date","code"')
         cols_type = None
 
     # 删旧数据
-    mdb.executeSql(f"DELETE FROM `{table_name}` WHERE `date` = '{date_str}'")
+    mdb.executeSql(f'DELETE FROM "{table_name}" WHERE "date" = \'{date_str}\'')
 
     if not result:
         log.info(f"[volume_surge] {date_str} 无满足条件股票")
         return
 
     df = pd.DataFrame(result)
-    mdb.insert_db_from_df(df, table_name, None, False, "`date`,`code`")
+    mdb.insert_db_from_df(df, table_name, None, False, '"date","code"')
     log.info(f"[volume_surge] {date_str} 写入 {len(result)} 条")
 
 

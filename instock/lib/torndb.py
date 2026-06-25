@@ -1,63 +1,39 @@
 #!/usr/local/bin/python
 # -*- coding: utf-8 -*-
-
-"""A lightweight wrapper around pymysql.
-Originally part of the Tornado framework.  The tornado.database module
-is slated for removal in Tornado 3.0, and it is now available separately
-as torndb.
+"""
+torndb - PostgreSQL version
+A lightweight wrapper around psycopg2, API-compatible with the original
+pymysql-based torndb used by this project.
 """
 
 from __future__ import absolute_import, division, with_statement
-import copy
 import itertools
 import logging
-import os
 import time
-import pymysql
+import psycopg2
+import psycopg2.extras
+import psycopg2.extensions
 
 __author__ = 'myh '
-__date__ = '2023/3/10 '
+__date__ = '2025/12/31 '
 
-try:
+version = "0.4"
+version_info = (0, 4, 0, 0)
 
-    # import MySQLdb.constants
-    # import MySQLdb.converters
-    # import MySQLdb.cursors
-
-    # 修改
-    import pymysql.connections
-    import pymysql.converters
-    import pymysql.cursors
-    import pymysql.constants.FLAG
-
-
-except ImportError:
-    # If MySQLdb isn't available this module won't actually be useable,
-    # but we want it to at least be importable on readthedocs.org,
-    # which has limitations on third-party modules.
-    if 'READTHEDOCS' in os.environ:
-        pymysql = None
-    else:
-        raise
-
-version = "0.3"
-version_info = (0, 3, 0, 0)
+# Alias common psycopg2 exceptions so existing code that catches these works
+IntegrityError  = psycopg2.IntegrityError
+OperationalError = psycopg2.OperationalError
 
 
 class Connection(object):
-    """A lightweight wrapper around MySQLdb DB-API connections.
-    The main value we provide is wrapping rows in a dict/object so that
-    columns can be accessed by name. Typical usage::
-        db = torndb.Connection("localhost", "mydatabase")
-        for article in db.query("SELECT * FROM articles"):
-            print article.title
-    Cursors are hidden by the implementation, but other than that, the methods
-    are very similar to the DB-API.
-    We explicitly set the timezone to UTC and assume the character encoding to
-    UTF-8 (can be changed) on all connections to avoid time zone and encoding errors.
-    The sql_mode parameter is set by default to "traditional", which "gives an error instead of a warning"
-    (http://dev.mysql.com/doc/refman/5.0/en/server-sql-mode.html). However, it can be set to
-    any other mode including blank (None) thereby explicitly clearing the SQL mode.
+    """
+    A lightweight wrapper around psycopg2, API-compatible with the original
+    pymysql torndb.Connection.
+
+    Key differences from MySQL version:
+    - %s placeholders work the same way (psycopg2 also uses %s)
+    - Backtick identifiers have been replaced with double-quotes in SQL strings
+    - Returned rows are Row objects (dict subclass), same as before
     """
 
     def __init__(self, host, database, user=None, password=None,
@@ -67,63 +43,49 @@ class Connection(object):
         self.database = database
         self.max_idle_time = float(max_idle_time)
 
-        #  自定义
-        args = dict(conv=CONVERSIONS, charset=charset,
-                    db=database, init_command=('SET time_zone = "%s"' % time_zone),
-                    connect_timeout=connect_timeout, sql_mode=sql_mode)
-        # args = dict(conv=CONVERSIONS, use_unicode=True, charset=charset,
-        #             db=database, init_command=('SET time_zone = "%s"' % time_zone),
-        #             connect_timeout=connect_timeout, sql_mode=sql_mode)
-        #
+        pair = host.split(":")
+        pg_host = pair[0]
+        pg_port = int(pair[1]) if len(pair) == 2 else 5432
 
+        self._db_args = dict(
+            host=pg_host,
+            port=pg_port,
+            dbname=database,
+            connect_timeout=connect_timeout,
+        )
         if user is not None:
-            args["user"] = user
+            self._db_args["user"] = user
         if password is not None:
-            args["passwd"] = password
-
-        # We accept a path to a MySQL socket file or a host(:port) string
-        if "/" in host:
-            args["unix_socket"] = host
-        else:
-            self.socket = None
-            pair = host.split(":")
-            if len(pair) == 2:
-                args["host"] = pair[0]
-                args["port"] = int(pair[1])
-            else:
-                args["host"] = host
-                args["port"] = 3306
+            self._db_args["password"] = password
 
         self._db = None
-        self._db_args = args
         self._last_use_time = time.time()
         try:
             self.reconnect()
         except Exception:
-            logging.error(f"Cannot connect to MySQL on {self.host}", exc_info=True)
+            logging.error(f"Cannot connect to PostgreSQL on {self.host}", exc_info=True)
 
     def __del__(self):
         self.close()
 
     def close(self):
-        """Closes this database connection."""
         if getattr(self, "_db", None) is not None:
-            self._db.close()
+            try:
+                self._db.close()
+            except Exception:
+                pass
             self._db = None
 
     def reconnect(self):
-        """Closes the existing database connection and re-opens it."""
         self.close()
-
-        # self._db = MySQLdb.connect(**self._db_args)
-        self._db = pymysql.connect(**self._db_args)
-
-        self._db.autocommit(True)
+        self._db = psycopg2.connect(**self._db_args)
+        # autocommit so each statement commits immediately (same behaviour as MySQL version)
+        self._db.autocommit = True
 
     def iter(self, query, *parameters, **kwparameters):
         """Returns an iterator for the given query and parameters."""
         self._ensure_connected()
-        cursor = pymysql.cursors.SSCursor(self._db)
+        cursor = self._db.cursor(cursor_factory=psycopg2.extras.DictCursor)
         try:
             self._execute(cursor, query, parameters, kwparameters)
             column_names = [d[0] for d in cursor.description]
@@ -132,53 +94,39 @@ class Connection(object):
         finally:
             cursor.close()
 
-    # 自定义
     def query(self, query, *parameters, **kwparameters):
         """Returns a row list for the given query and parameters."""
         cursor = self._cursor()
         try:
             self._execute(cursor, query, parameters, kwparameters)
+            if cursor.description is None:
+                return []
             column_names = [d[0] for d in cursor.description]
             return [Row(itertools.zip_longest(column_names, row)) for row in cursor]
         finally:
             cursor.close()
 
-    # def query(self, query, *parameters, **kwparameters):
-    #     """Returns a row list for the given query and parameters."""
-    #     cursor = self._cursor()
-    #     try:
-    #         self._execute(cursor, query, parameters, kwparameters)
-    #         column_names = [d[0] for d in cursor.description]
-    #         return [Row(itertools.izip(column_names, row)) for row in cursor]
-    #     finally:
-    #         cursor.close()
-    #
-
     def get(self, query, *parameters, **kwparameters):
-        """Returns the (singular) row returned by the given query.
-        If the query has no results, returns None.  If it has
-        more than one result, raises an exception.
-        """
+        """Returns the singular row returned by the given query, or None."""
         rows = self.query(query, *parameters, **kwparameters)
         if not rows:
             return None
         elif len(rows) > 1:
             raise Exception("Multiple rows returned for Database.get() query")
-        else:
-            return rows[0]
+        return rows[0]
 
-    # rowcount is a more reasonable default return value than lastrowid,
-    # but for historical compatibility execute() must return lastrowid.
     def execute(self, query, *parameters, **kwparameters):
         """Executes the given query, returning the lastrowid from the query."""
         return self.execute_lastrowid(query, *parameters, **kwparameters)
 
     def execute_lastrowid(self, query, *parameters, **kwparameters):
-        """Executes the given query, returning the lastrowid from the query."""
+        """Executes the given query, returning the lastrowid (or None)."""
         cursor = self._cursor()
         try:
             self._execute(cursor, query, parameters, kwparameters)
-            return cursor.lastrowid
+            # Try to get lastrowid via RETURNING or cursor.lastrowid not available in psycopg2
+            # Return rowcount as a reasonable fallback
+            return cursor.rowcount
         finally:
             cursor.close()
 
@@ -192,26 +140,9 @@ class Connection(object):
             cursor.close()
 
     def executemany(self, query, parameters):
-        """Executes the given query against all the given param sequences.
-        We return the lastrowid from the query.
-        """
         return self.executemany_lastrowid(query, parameters)
 
     def executemany_lastrowid(self, query, parameters):
-        """Executes the given query against all the given param sequences.
-        We return the lastrowid from the query.
-        """
-        cursor = self._cursor()
-        try:
-            cursor.executemany(query, parameters)
-            return cursor.lastrowid
-        finally:
-            cursor.close()
-
-    def executemany_rowcount(self, query, parameters):
-        """Executes the given query against all the given param sequences.
-        We return the rowcount from the query.
-        """
         cursor = self._cursor()
         try:
             cursor.executemany(query, parameters)
@@ -219,20 +150,24 @@ class Connection(object):
         finally:
             cursor.close()
 
-    update = execute_rowcount
-    updatemany = executemany_rowcount
+    def executemany_rowcount(self, query, parameters):
+        cursor = self._cursor()
+        try:
+            cursor.executemany(query, parameters)
+            return cursor.rowcount
+        finally:
+            cursor.close()
 
-    insert = execute_lastrowid
+    update    = execute_rowcount
+    updatemany = executemany_rowcount
+    insert    = execute_lastrowid
     insertmany = executemany_lastrowid
 
     def _ensure_connected(self):
-        # Mysql by default closes client connections that are idle for
-        # 8 hours, but the client library does not report this fact until
-        # you try to perform a query and it fails.  Protect against this
-        # case by preemptively closing and reopening the connection
-        # if it has been idle for too long (7 hours by default).
-        if (self._db is None or
-                (time.time() - self._last_use_time > self.max_idle_time)):
+        if self._db is None or (time.time() - self._last_use_time > self.max_idle_time):
+            self.reconnect()
+        # Also check if connection is still alive (closed=0 means open)
+        elif self._db.closed != 0:
             self.reconnect()
         self._last_use_time = time.time()
 
@@ -242,9 +177,9 @@ class Connection(object):
 
     def _execute(self, cursor, query, parameters, kwparameters):
         try:
-            return cursor.execute(query, kwparameters or parameters)
+            return cursor.execute(query, kwparameters or parameters or None)
         except OperationalError:
-            logging.error(f"Error connecting to MySQL on {self.host}")
+            logging.error(f"Error connecting to PostgreSQL on {self.host}")
             self.close()
             raise
 
@@ -257,22 +192,3 @@ class Row(dict):
             return self[name]
         except KeyError:
             raise AttributeError(name)
-
-
-if pymysql is not None:
-    # Fix the access conversions to properly recognize unicode/binary
-    FIELD_TYPE = pymysql.constants.FIELD_TYPE
-    FLAG = pymysql.constants.FLAG
-    CONVERSIONS = copy.copy(pymysql.converters.conversions)
-
-    field_types = [FIELD_TYPE.BLOB, FIELD_TYPE.STRING, FIELD_TYPE.VAR_STRING]
-    if 'VARCHAR' in vars(FIELD_TYPE):
-        field_types.append(FIELD_TYPE.VARCHAR)
-
-    for field_type in field_types:
-        # CONVERSIONS[field_type] = [(FLAG.BINARY, str)] + CONVERSIONS[field_type]
-        CONVERSIONS[field_type] = [(FLAG.BINARY, str)].append(CONVERSIONS[field_type])
-
-    # Alias some common MySQL exceptions
-    IntegrityError = pymysql.IntegrityError
-    OperationalError = pymysql.OperationalError

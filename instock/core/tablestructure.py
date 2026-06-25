@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-from sqlalchemy import DATE, VARCHAR, FLOAT, BIGINT, SmallInteger, DATETIME
-from sqlalchemy.dialects.mysql import BIT
+from sqlalchemy import DATE, FLOAT, BIGINT, SmallInteger, DATETIME, Boolean as BIT
+from sqlalchemy import VARCHAR as _SA_VARCHAR
+
+def VARCHAR(length, collation=None):
+    """PostgreSQL 兼容的 VARCHAR，忽略 MySQL collation 参数"""
+    return _SA_VARCHAR(length)
 import talib as tl
 from instock.core.strategy import enter
 from instock.core.strategy import turtle_trade
@@ -20,7 +24,7 @@ __author__ = 'myh '
 __date__ = '2023/3/10 '
 
 RATE_FIELDS_COUNT = 100  # N日收益率字段数目，即N值
-_COLLATE = "utf8mb4_general_ci"
+_COLLATE = None  # PostgreSQL 不使用 MySQL collation
 
 TABLE_CN_STOCK_ATTENTION = {'name': 'cn_stock_attention', 'cn': '我的关注',
                             'columns': {'datetime': {'type': DATETIME, 'cn': '日期', 'size': 0},

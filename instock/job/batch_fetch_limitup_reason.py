@@ -47,7 +47,7 @@ def get_trade_dates(start: str, end: str) -> list:
 def already_done(date_iso: str) -> bool:
     try:
         r = mdb.executeSqlFetch(
-            f"SELECT COUNT(*) FROM `{TABLE}` WHERE `date`=%s", (date_iso,)
+            f'SELECT COUNT(*) FROM "{TABLE}" WHERE "date"=%s', (date_iso,)
         )
         return bool(r and r[0][0] > 0)
     except Exception:
@@ -57,11 +57,11 @@ def already_done(date_iso: str) -> bool:
 def save_day(data, date_iso: str) -> int:
     table_name = TABLE
     if mdb.checkTableIsExist(table_name):
-        mdb.executeSql(f"DELETE FROM `{table_name}` WHERE `date`='{date_iso}'")
+        mdb.executeSql(f'DELETE FROM `{table_name}` WHERE "date"=\'{date_iso}\'')
         cols_type = None
     else:
         cols_type = tbs.get_field_types(tbs.TABLE_CN_STOCK_LIMITUP_REASON['columns'])
-    mdb.insert_db_from_df(data, table_name, cols_type, False, "`date`,`code`")
+    mdb.insert_db_from_df(data, table_name, cols_type, False, '"date","code"')
     return len(data)
 
 

@@ -51,12 +51,11 @@ class SaveCollectHandler(webBase.BaseHandler, ABC):
         try:
             table_name = tbs.TABLE_CN_STOCK_ATTENTION['name']
             if otype in ('1', 'del'):
-                sql = f"DELETE FROM `{table_name}` WHERE `code` = %s"
+                sql = 'DELETE FROM "' + table_name + '" WHERE "code" = %s'
                 self.db.query(sql, code)
             else:
-                # sql = f"INSERT INTO `{table_name}`(`datetime`, `code`) VALUE('{datetime.datetime.now()}','{code}')"
-                sql = f"INSERT INTO `{table_name}`(`datetime`, `code`) VALUE(%s, %s)"
-                self.db.query(sql,datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"),code)
+                sql = 'INSERT INTO "' + table_name + '" ("datetime", "code") VALUES (%s, %s) ON CONFLICT ("code") DO UPDATE SET "datetime"=EXCLUDED."datetime"'
+                self.db.query(sql, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"), code)
         except Exception as e:
             err = {"error": str(e)}
             # logging.info(err)

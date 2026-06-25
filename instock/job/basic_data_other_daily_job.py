@@ -31,12 +31,12 @@ def save_nph_stock_lhb_data(date, before=True):
         table_name = tbs.TABLE_CN_STOCK_lHB['name']
         # 删除老数据。
         if mdb.checkTableIsExist(table_name):
-            del_sql = f"DELETE FROM `{table_name}` where `date` = '{date}'"
+            del_sql = f'DELETE FROM "{table_name}" WHERE "date" = \'{date}\' '
             mdb.executeSql(del_sql)
             cols_type = None
         else:
             cols_type = tbs.get_field_types(tbs.TABLE_CN_STOCK_lHB['columns'])
-        mdb.insert_db_from_df(data, table_name, cols_type, False, "`date`,`code`")
+        mdb.insert_db_from_df(data, table_name, cols_type, False, '"date","code"')
     except Exception as e:
         logging.error(f"basic_data_other_daily_job.save_stock_lhb_data处理异常：{e}")
     stock_spot_buy(date)
@@ -54,12 +54,12 @@ def save_nph_stock_top_data(date, before=True):
         table_name = tbs.TABLE_CN_STOCK_TOP['name']
         # 删除老数据。
         if mdb.checkTableIsExist(table_name):
-            del_sql = f"DELETE FROM `{table_name}` where `date` = '{date}'"
+            del_sql = f'DELETE FROM "{table_name}" WHERE "date" = \'{date}\' '
             mdb.executeSql(del_sql)
             cols_type = None
         else:
             cols_type = tbs.get_field_types(tbs.TABLE_CN_STOCK_TOP['columns'])
-        mdb.insert_db_from_df(data, table_name, cols_type, False, "`date`,`code`")
+        mdb.insert_db_from_df(data, table_name, cols_type, False, '"date","code"')
     except Exception as e:
         logging.error(f"basic_data_other_daily_job.save_stock_top_data处理异常：{e}")
     stock_spot_buy(date)
@@ -93,13 +93,13 @@ def save_nph_stock_fund_flow_data(date, before=True):
         table_name = tbs.TABLE_CN_STOCK_FUND_FLOW['name']
         # 删除老数据。
         if mdb.checkTableIsExist(table_name):
-            del_sql = f"DELETE FROM `{table_name}` where `date` = '{date}'"
+            del_sql = f'DELETE FROM "{table_name}" WHERE "date" = \'{date}\' '
             mdb.executeSql(del_sql)
             cols_type = None
         else:
             cols_type = tbs.get_field_types(tbs.TABLE_CN_STOCK_FUND_FLOW['columns'])
 
-        mdb.insert_db_from_df(data, table_name, cols_type, False, "`date`,`code`")
+        mdb.insert_db_from_df(data, table_name, cols_type, False, '"date","code"')
     except Exception as e:
         logging.error(f"basic_data_other_daily_job.save_nph_stock_fund_flow_data处理异常：{e}")
 
@@ -170,13 +170,13 @@ def stock_sector_fund_flow_data(date, index_sector):
         table_name = tbs_table['name']
         # 删除老数据。
         if mdb.checkTableIsExist(table_name):
-            del_sql = f"DELETE FROM `{table_name}` where `date` = '{date}'"
+            del_sql = f'DELETE FROM "{table_name}" WHERE "date" = \'{date}\' '
             mdb.executeSql(del_sql)
             cols_type = None
         else:
             cols_type = tbs.get_field_types(tbs_table['columns'])
 
-        mdb.insert_db_from_df(data, table_name, cols_type, False, "`date`,`name`")
+        mdb.insert_db_from_df(data, table_name, cols_type, False, '"date","name"')
     except Exception as e:
         logging.error(f"basic_data_other_daily_job.stock_sector_fund_flow_data处理异常：{e}")
 
@@ -215,12 +215,12 @@ def save_nph_stock_bonus(date, before=True):
         table_name = tbs.TABLE_CN_STOCK_BONUS['name']
         # 删除老数据。
         if mdb.checkTableIsExist(table_name):
-            del_sql = f"DELETE FROM `{table_name}` where `date` = '{date}'"
+            del_sql = f'DELETE FROM "{table_name}" WHERE "date" = \'{date}\' '
             mdb.executeSql(del_sql)
             cols_type = None
         else:
             cols_type = tbs.get_field_types(tbs.TABLE_CN_STOCK_BONUS['columns'])
-        mdb.insert_db_from_df(data, table_name, cols_type, False, "`date`,`code`")
+        mdb.insert_db_from_df(data, table_name, cols_type, False, '"date","code"')
     except Exception as e:
         logging.error(f"basic_data_other_daily_job.save_nph_stock_bonus处理异常：{e}")
 
@@ -232,8 +232,8 @@ def stock_spot_buy(date):
         if not mdb.checkTableIsExist(_table_name):
             return
 
-        sql = f'''SELECT * FROM `{_table_name}` WHERE `date` = '{date}' and 
-                `pe9` > 0 and `pe9` <= 20 and `pbnewmrq` <= 10 and `roe_weight` >= 15'''
+        sql = f'''SELECT * FROM \"{_table_name}\" WHERE "date" = '{date}' and 
+                "pe9" > 0 and "pe9" <= 20 and "pbnewmrq" <= 10 and "roe_weight" >= 15'''
         data = pd.read_sql(sql=sql, con=mdb.engine())
         data = data.drop_duplicates(subset="code", keep="last")
         if len(data.index) == 0:
@@ -242,13 +242,13 @@ def stock_spot_buy(date):
         table_name = tbs.TABLE_CN_STOCK_SPOT_BUY['name']
         # 删除老数据。
         if mdb.checkTableIsExist(table_name):
-            del_sql = f"DELETE FROM `{table_name}` where `date` = '{date}'"
+            del_sql = f'DELETE FROM "{table_name}" WHERE "date" = \'{date}\' '
             mdb.executeSql(del_sql)
             cols_type = None
         else:
             cols_type = tbs.get_field_types(tbs.TABLE_CN_STOCK_SPOT_BUY['columns'])
 
-        mdb.insert_db_from_df(data, table_name, cols_type, False, "`date`,`code`")
+        mdb.insert_db_from_df(data, table_name, cols_type, False, '"date","code"')
     except Exception as e:
         logging.error(f"basic_data_other_daily_job.stock_spot_buy处理异常：{e}")
 
@@ -263,13 +263,13 @@ def stock_imitup_reason_data(date):
         table_name = tbs.TABLE_CN_STOCK_LIMITUP_REASON['name']
         # 删除老数据。
         if mdb.checkTableIsExist(table_name):
-            del_sql = f"DELETE FROM `{table_name}` where `date` = '{date}'"
+            del_sql = f'DELETE FROM "{table_name}" WHERE "date" = \'{date}\' '
             mdb.executeSql(del_sql)
             cols_type = None
         else:
             cols_type = tbs.get_field_types(tbs.TABLE_CN_STOCK_LIMITUP_REASON['columns'])
 
-        mdb.insert_db_from_df(data, table_name, cols_type, False, "`date`,`code`")
+        mdb.insert_db_from_df(data, table_name, cols_type, False, '"date","code"')
     except Exception as e:
         logging.error(f"basic_data_other_daily_job.stock_imitup_reason_data：{e}")
 

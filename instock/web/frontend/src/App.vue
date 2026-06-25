@@ -35,9 +35,33 @@
             <template #title>我的关注</template>
           </el-menu-item>
 
-          <!-- 动态菜单分组 -->
+          <!-- 固定项：量能监控（在自有策略同级插入）-->
+          <el-sub-menu index="volume_group">
+            <template #title>
+              <el-icon><DataAnalysis /></el-icon>
+              <span>自有策略</span>
+            </template>
+            <el-menu-item index="/volume_monitor">
+              <span>量能异动监控</span>
+            </el-menu-item>
+            <el-menu-item
+              v-for="item in customStrategyItems"
+              :key="item.table"
+              :index="`/custom/${item.table}`"
+            >
+              <span>{{ item.name }}</span>
+            </el-menu-item>
+            <el-menu-item index="/factor_config">
+              <span>因子配置</span>
+            </el-menu-item>
+            <el-menu-item index="/score_single">
+              <span>单股票计算</span>
+            </el-menu-item>
+          </el-sub-menu>
+
+          <!-- 动态菜单分组（自有策略已单独处理，这里排除）-->
           <el-sub-menu
-            v-for="group in menuModules"
+            v-for="group in menuModules.filter(g => g.type !== '自有策略')"
             :key="group.type"
             :index="group.type"
           >
@@ -85,10 +109,16 @@
 import { ref, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { menuModules } from '@/config/menus'
-import { Star } from '@element-plus/icons-vue'
+import { Star, DataAnalysis } from '@element-plus/icons-vue'
 
 const collapsed = ref(false)
 const route = useRoute()
+
+// 自有策略子项（供菜单使用）
+const customStrategyItems = computed(() => {
+  const g = menuModules.find(m => m.type === '自有策略')
+  return g ? g.items : []
+})
 
 const activeMenu = computed(() => route.path)
 
@@ -98,6 +128,10 @@ const pageTitle = computed(() => {
   if (path === '/sync') return '数据同步管理'
   if (path === '/watchlist') return '我的关注'
   if (path === '/indicators') return 'K线指标图表'
+  if (path === '/volume_monitor') return '量能异动监控'
+  if (path === '/system_health') return '系统运行监控'
+  if (path === '/factor_config') return '量能因子配置'
+  if (path === '/score_single')  return '单股票计算'
   if (path.startsWith('/table/')) {
     const table = path.replace('/table/', '')
     for (const g of menuModules) {

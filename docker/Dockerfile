@@ -24,25 +24,8 @@ trusted-host = mirrors.aliyun.com" > /etc/pip.conf && \
     ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
     echo "Asia/Shanghai" > /etc/timezone && \
     apt-get update && \
-    apt-get install -y cron gcc make python3-dev default-libmysqlclient-dev build-essential pkg-config curl && \
-    pip install supervisor && \
-    pip install mysqlclient && \
-    pip install requests && \
-    pip install arrow && \
-    pip install numpy && \
-    pip install SQLAlchemy && \
-    pip install PyMySQL && \
-    pip install Logbook && \
-    pip install python_dateutil && \
-    pip install py_mini_racer && \
-    pip install tqdm && \
-    pip install beautifulsoup4 && \
-    pip install bokeh && \
-    pip install pandas && \
-    pip install urllib3 && \
-    pip install tornado && \
-    pip install mini-racer && \
-    pip install easytrader && \
+    apt-get install -y cron gcc make python3-dev build-essential pkg-config curl && \
+    pip install --no-cache-dir supervisor && \
     mkdir ta-lib && \
     curl -SL $(curl -s https://api.github.com/repos/ta-lib/ta-lib/releases/latest | grep browser_download_url | cut -d'"' -f4 |grep -E 'tar.gz$') | tar -xz --strip-components=1 -C ./ta-lib && \
     cd ta-lib/ && \
@@ -50,9 +33,7 @@ trusted-host = mirrors.aliyun.com" > /etc/pip.conf && \
     make && \
     make install && \
     cd .. && \
-    pip install TA-Lib && \
     rm -rf ta-lib* && \
-    apt-get --purge remove -y gcc make python3-dev default-libmysqlclient-dev curl && \
     rm -rf /root/.cache/* && rm -rf /var/lib/apt/lists/* && apt-get clean && apt-get autoclean && apt-get autoremove -y
 
 WORKDIR /data
@@ -61,6 +42,11 @@ COPY stock /data/InStock
 COPY cron/cron.hourly /etc/cron.hourly
 COPY cron/cron.workdayly /etc/cron.workdayly
 COPY cron/cron.monthly /etc/cron.monthly
+
+RUN pip install --no-cache-dir -r /data/InStock/requirements.txt
+
+RUN apt-get --purge remove -y gcc make python3-dev curl && \
+    rm -rf /root/.cache/* && apt-get clean && apt-get autoclean && apt-get autoremove -y
 
 #add cron sesrvice.
 #任务调度

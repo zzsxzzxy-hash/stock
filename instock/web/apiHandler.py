@@ -13,6 +13,7 @@ import datetime
 from abc import ABC
 
 from tornado import gen
+import requests as _req
 import instock.lib.trade_time as trd
 import instock.core.singleton_stock_web_module_data as sswmd
 import instock.core.tablestructure as tbs
@@ -29,7 +30,7 @@ _ATTENTION_TABLE = tbs.TABLE_CN_STOCK_ATTENTION['name']
 def _build_data_sql(wmd, where_clause):
     """
     构造查询 SQL。
-    where_clause 使用无表前缀的列名（如 "`date` = %s"）。
+    where_clause 使用无表前缀的列名（如 ""date" = %s"）。
     若 order_columns 含关联子查询，改为 LEFT JOIN，消除 N+1 问题。
     """
     tname    = wmd.table_name
@@ -42,23 +43,23 @@ def _build_data_sql(wmd, where_clause):
 
     if has_attention_join:
         # 为 JOIN 查询给列加表别名前缀
-        prefixed_where = where_clause.replace('`date`', 't.`date`').replace('`code`', 't.`code`').replace('`name`', 't.`name`')
+        prefixed_where = where_clause.replace('"date"', 't."date"').replace('"code"', 't."code"').replace('"name"', 't."name"')
         sql = (
-            f"SELECT t.*, a.`datetime` AS `cdatetime`"
-            f" FROM `{tname}` t"
-            f" LEFT JOIN `{_ATTENTION_TABLE}` a ON a.`code` = t.`code`"
-            f"{prefixed_where}"
-            f"{order_by}"
+            f'SELECT t.*, a."datetime" AS "cdatetime"'
+            f' FROM "{tname}" t'
+            f' LEFT JOIN "{_ATTENTION_TABLE}" a ON a."code" = t."code"'
+            f'{prefixed_where}'
+            f'{order_by}'
         )
     elif wmd.order_columns:
         sql = (
-            f"SELECT *, {wmd.order_columns}"
-            f" FROM `{tname}`"
-            f"{where_clause}"
-            f"{order_by}"
+            f'SELECT *, {wmd.order_columns}'
+            f' FROM "{tname}"'
+            f'{where_clause}'
+            f'{order_by}'
         )
     else:
-        sql = f"SELECT * FROM `{tname}`{where_clause}{order_by}"
+        sql = 'SELECT * FROM "' + tname + '"' + where_clause + order_by
 
     return sql, has_attention_join
 
@@ -121,20 +122,20 @@ class ApiDataHandler(webBase.BaseHandler, ABC):
             conditions = []
             params = []
             if date:
-                conditions.append("`date` = %s")
+                conditions.append('"date" = %s')
                 params.append(date)
             if search:
                 kw = f"%{search}%"
                 if has_code:
-                    conditions.append("(`code` LIKE %s OR `name` LIKE %s)")
+                    conditions.append('("code" LIKE %s OR "name" LIKE %s)')
                     params.extend([kw, kw])
                 else:
-                    conditions.append("`name` LIKE %s")
+                    conditions.append('"name" LIKE %s')
                     params.append(kw)
             if market and has_code:
                 prefixes = self._MARKET_PREFIXES.get(market, [])
                 if prefixes:
-                    like_parts = ' OR '.join(['`code` LIKE %s'] * len(prefixes))
+                    like_parts = ' OR '.join(['"code" LIKE %s'] * len(prefixes))
                     conditions.append(f"({like_parts})")
                     params.extend([f"{p}%" for p in prefixes])
 
@@ -147,24 +148,24 @@ class ApiDataHandler(webBase.BaseHandler, ABC):
             cnt_conds = []
             cnt_params = []
             if date:
-                cnt_conds.append("`date` = %s");  cnt_params.append(date)
+                cnt_conds.append('"date" = %s');  cnt_params.append(date)
             if search:
                 kw = f"%{search}%"
                 if has_code:
-                    cnt_conds.append("(`code` LIKE %s OR `name` LIKE %s)")
+                    cnt_conds.append('("code" LIKE %s OR "name" LIKE %s)')
                     cnt_params.extend([kw, kw])
                 else:
-                    cnt_conds.append("`name` LIKE %s")
+                    cnt_conds.append('"name" LIKE %s')
                     cnt_params.append(kw)
             if market and has_code:
                 prefixes = self._MARKET_PREFIXES.get(market, [])
                 if prefixes:
-                    like_parts = ' OR '.join(['`code` LIKE %s'] * len(prefixes))
+                    like_parts = ' OR '.join(['"code" LIKE %s'] * len(prefixes))
                     cnt_conds.append(f"({like_parts})")
                     cnt_params.extend([f"{p}%" for p in prefixes])
 
             cnt_where = (" WHERE " + " AND ".join(cnt_conds)) if cnt_conds else ""
-            count_sql = f"SELECT COUNT(*) AS cnt FROM `{wmd.table_name}`{cnt_where}"
+            count_sql = 'SELECT COUNT(*) AS cnt FROM "' + wmd.table_name + '"'  + cnt_where
 
             total_row = self.db.get(count_sql, *cnt_params)
             data      = self.db.query(paged_sql, *params)
@@ -217,14 +218,13 @@ class ApiKlineHandler(webBase.BaseHandler, ABC):
             return
         try:
             # 日K：直接取最近 500 条
-            sql = f"""
-                SELECT date, open, close, high, low, volume, amount,
-                       quote_change, ups_downs, turnover
-                FROM `{self._HIST_TABLE}`
-                WHERE code = %s
-                ORDER BY date DESC
-                LIMIT 500
-            """
+            sql = (
+                'SELECT date, open, close, high, low, volume, amount,'
+                ' quote_change, ups_downs, turnover'
+                ' FROM "' + self._HIST_TABLE + '"'
+                ' WHERE code = %s'
+                ' ORDER BY date DESC LIMIT 500'
+            )
             rows = list(reversed(self.db.query(sql, code)))
 
             if not rows:
@@ -301,7 +301,7 @@ class ApiWatchlistHandler(webBase.BaseHandler, ABC):
     """
 
     def _get_latest_date(self):
-        row = self.db.get("SELECT MAX(`date`) AS d FROM `cn_stock_spot`")
+        row = self.db.get('SELECT MAX("date") AS d FROM "cn_stock_spot"')
         return str(row['d']) if row and row['d'] else None
 
     def get(self):
@@ -312,21 +312,21 @@ class ApiWatchlistHandler(webBase.BaseHandler, ABC):
             if latest:
                 rows = self.db.query(
                     """
-                    SELECT a.`datetime`, a.`code`,
-                           s.`name`, s.`new_price`, s.`change_rate`,
-                           s.`volume`, s.`deal_amount`, s.`high_price`,
-                           s.`low_price`, s.`open_price`, s.`pre_close_price`,
-                           s.`amplitude`, s.`turnoverrate`
-                    FROM `cn_stock_attention` a
-                    LEFT JOIN `cn_stock_spot` s
-                           ON s.`code` = a.`code` AND s.`date` = %s
-                    ORDER BY a.`datetime` DESC
+                    SELECT a."datetime", a."code",
+                           s."name", s."new_price", s."change_rate",
+                           s."volume", s."deal_amount", s."high_price",
+                           s."low_price", s."open_price", s."pre_close_price",
+                           s."amplitude", s."turnoverrate"
+                    FROM "cn_stock_attention" a
+                    LEFT JOIN "cn_stock_spot" s
+                           ON s."code" = a."code" AND s."date" = %s
+                    ORDER BY a."datetime" DESC
                     """,
                     latest
                 )
             else:
                 rows = self.db.query(
-                    "SELECT `datetime`, `code` FROM `cn_stock_attention` ORDER BY `datetime` DESC"
+                    'SELECT "datetime", "code" FROM "cn_stock_attention" ORDER BY "datetime" DESC'
                 )
             self.write(json.dumps(
                 {'data': rows, 'latest_date': latest},
@@ -348,7 +348,7 @@ class ApiWatchlistHandler(webBase.BaseHandler, ABC):
                 return
             now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')
             self.db.execute(
-                "INSERT IGNORE INTO `cn_stock_attention`(`datetime`,`code`) VALUES(%s,%s)",
+                'INSERT INTO "cn_stock_attention"("datetime","code") VALUES(%s,%s) ON CONFLICT ("code") DO UPDATE SET "datetime"=EXCLUDED."datetime"',
                 now, code
             )
             self.write(json.dumps({'ok': True}))
@@ -365,7 +365,7 @@ class ApiWatchlistHandler(webBase.BaseHandler, ABC):
                 self.set_status(400)
                 self.write(json.dumps({'error': 'code required'}))
                 return
-            self.db.execute("DELETE FROM `cn_stock_attention` WHERE `code`=%s", code)
+            self.db.execute('DELETE FROM "cn_stock_attention" WHERE "code"=%s', code)
             self.write(json.dumps({'ok': True}))
         except Exception as e:
             self.set_status(500)
@@ -401,33 +401,33 @@ class ApiCustomStrategyHandler(webBase.BaseHandler, ABC):
 
             conds, params = [], []
             if date:
-                conds.append('s.`date` = %s'); params.append(date)
+                conds.append('s."date" = %s'); params.append(date)
             if search:
                 kw = f'%{search}%'
-                conds.append('(s.`code` LIKE %s OR s.`name` LIKE %s)')
+                conds.append('(s."code" LIKE %s OR s."name" LIKE %s)')
                 params.extend([kw, kw])
             where = ('WHERE ' + ' AND '.join(conds)) if conds else ''
 
-            cnt_r = self.db.get(f"SELECT COUNT(*) AS cnt FROM `{table}` s {where}", *params)
+            cnt_r = self.db.get('SELECT COUNT(*) AS cnt FROM "' + table + '" s ' + where, *params)
             total = cnt_r['cnt'] if cnt_r else 0
 
             # 只做一次 LEFT JOIN 拿最新价，其余字段全部直接读库
-            data_sql = f"""
-                SELECT
-                    s.*,
-                    CAST(sp.`new_price`   AS DECIMAL(12,4)) AS current_price,
-                    CAST(sp.`change_rate` AS DECIMAL(12,4)) AS today_change,
-                    CASE WHEN s.`signal_close` > 0
-                         THEN ROUND((sp.`new_price` - s.`signal_close`) / s.`signal_close` * 100, 2)
-                         ELSE NULL END AS chg_from_signal
-                FROM `{table}` s
-                LEFT JOIN `cn_stock_spot` sp
-                    ON sp.`code` = s.`code`
-                    AND sp.`date` = (SELECT MAX(date) FROM `cn_stock_spot`)
-                {where}
-                ORDER BY s.`date` DESC, chg_from_signal DESC
-                LIMIT {size} OFFSET {offset}
-            """
+            data_sql = (
+                'SELECT s.*, '
+                'CAST(sp."new_price" AS NUMERIC(12,4)) AS current_price, '
+                'CAST(sp."change_rate" AS NUMERIC(12,4)) AS today_change, '
+                'CASE WHEN CAST(s."signal_close" AS NUMERIC) > 0 '
+                '     THEN ROUND((CAST(sp."new_price" AS NUMERIC) - CAST(s."signal_close" AS NUMERIC)) '
+                '          / CAST(s."signal_close" AS NUMERIC) * 100, 2) '
+                '     ELSE NULL END AS chg_from_signal '
+                'FROM "' + table + '" s '
+                'LEFT JOIN "cn_stock_spot" sp '
+                '    ON sp."code" = s."code" '
+                '    AND sp."date" = (SELECT MAX("date") FROM "cn_stock_spot") '
+                + where +
+                ' ORDER BY s."date" DESC, chg_from_signal DESC'
+                ' LIMIT ' + str(size) + ' OFFSET ' + str(offset)
+            )
             rows = self.db.query(data_sql, *params)
 
             import decimal
@@ -468,7 +468,6 @@ class ApiSinaRealtimeHandler(webBase.BaseHandler, ABC):
     """
     @gen.coroutine
     def get(self):
-        import requests as _req
         codes_str = self.get_argument('codes', '')
         if not codes_str:
             self.write(json.dumps({}))
@@ -520,4 +519,86 @@ class ApiSinaRealtimeHandler(webBase.BaseHandler, ABC):
         except Exception as e:
             self.set_status(500)
             self.write(json.dumps({'error': str(e)}, ensure_ascii=False))
+
+
+class ApiMinuteKlineHandler(webBase.BaseHandler, ABC):
+    """
+    GET /api/minute_kline?code=000001&date=2026-06-01
+    返回指定日期的1分钟K线数据。
+    优先从 XTick API 拉取（实时/历史），数据库作回退。
+    """
+
+    def get(self):
+        code = self.get_argument('code', default=None, strip=False)
+        date = self.get_argument('date', default=None, strip=False)
+
+        self.set_header('Content-Type', 'application/json;charset=UTF-8')
+        self.set_header('Access-Control-Allow-Origin', '*')
+
+        if not code or not date:
+            self.set_status(400)
+            self.write(json.dumps({'error': 'code and date required'}))
+            return
+
+        try:
+            result = self._fetch_from_xtick(code, date)
+            if not result:
+                result = self._fetch_from_db(code, date)
+            self.write(json.dumps(result, ensure_ascii=False))
+        except Exception as e:
+            self.set_status(500)
+            self.write(json.dumps({'error': str(e)}, ensure_ascii=False))
+
+    def _fetch_from_xtick(self, code: str, date: str) -> list:
+        """从 XTick /doc/kline/market?period=1m 拉取历史分钟数据"""
+        try:
+            from instock.core.minute_bar_collector import MinuteBarFetcher
+            fetcher = MinuteBarFetcher()
+            bars = fetcher.fetch_history(code, date)
+            if not bars:
+                return []
+            # 按时间过滤只保留当天（time字段已是HH:MM，date由时间戳决定）
+            result = []
+            for b in bars:
+                result.append({
+                    'time':      b['time'],
+                    'open':      b['open'],
+                    'close':     b['close'],
+                    'high':      b['high'],
+                    'low':       b['low'],
+                    'volume':    b['volume'],
+                    'amount':    b['amount'],
+                    'pre_close': b['pre_close'],
+                })
+            return sorted(result, key=lambda x: x['time'])
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"XTick分钟数据拉取失败，回退到数据库: {e}")
+            return []
+
+    def _fetch_from_db(self, code: str, date: str) -> list:
+        """从本地数据库 cn_stock_minute_bar 读取"""
+        try:
+            sql = (
+                'SELECT time, open, close, high, low, volume, amount, pre_close'
+                ' FROM cn_stock_minute_bar'
+                ' WHERE code = %s AND date = %s'
+                ' ORDER BY time'
+            )
+            rows = self.db.query(sql, code, date)
+            result = []
+            for r in rows:
+                result.append({
+                    'time':      r['time'],
+                    'open':      float(r['open']      or 0),
+                    'close':     float(r['close']     or 0),
+                    'high':      float(r['high']      or 0),
+                    'low':       float(r['low']       or 0),
+                    'volume':    float(r['volume']    or 0),
+                    'amount':    float(r['amount']    or 0),
+                    'pre_close': float(r['pre_close'] or 0),
+                })
+            return result
+        except Exception:
+            return []
 

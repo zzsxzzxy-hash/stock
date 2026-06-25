@@ -28,6 +28,8 @@ import instock.web.dataTableHandler as dataTableHandler
 import instock.web.dataIndicatorsHandler as dataIndicatorsHandler
 import instock.web.syncHandler as syncHandler
 import instock.web.apiHandler as apiHandler
+import instock.web.volumeHandler as volumeHandler
+import instock.web.systemHandler as systemHandler
 import instock.web.base as webBase
 
 __author__ = 'myh '
@@ -58,8 +60,34 @@ class Application(tornado.web.Application):
             (r"/api/trade_date",  apiHandler.ApiTradeDateHandler),
             (r"/api/watchlist",   apiHandler.ApiWatchlistHandler),
             (r"/api/custom_strategy", apiHandler.ApiCustomStrategyHandler),
-            (r"/api/sina_realtime",   apiHandler.ApiSinaRealtimeHandler),
-            (r"/instock/api_data/kline", apiHandler.ApiKlineHandler),
+            (r"/api/sina_realtime",         apiHandler.ApiSinaRealtimeHandler),
+            (r"/instock/api_data/kline",    apiHandler.ApiKlineHandler),
+            (r"/api/minute_kline",          apiHandler.ApiMinuteKlineHandler),
+
+            # ── 量能监控 API ───────────────────────────────────────────
+            (r"/api/volume_rank",          volumeHandler.ApiVolumeRankHandler),
+            (r"/api/volume_detail",        volumeHandler.ApiVolumeDetailHandler),
+            (r"/api/sector_list",          volumeHandler.ApiSectorListHandler),
+            (r"/api/sector_stocks",        volumeHandler.ApiSectorStocksHandler),
+            (r"/api/sector_map",           volumeHandler.ApiSectorMapHandler),
+            (r"/api/sector_map/batch",     volumeHandler.ApiSectorMapBatchHandler),
+            (r"/api/sector_map/stock",     volumeHandler.ApiSectorMapStockHandler),
+
+            # ── Redis 查询 API ────────────────────────────────────────
+            (r"/api/redis_query",          volumeHandler.ApiRedisQueryHandler),
+            (r"/api/redis_dates",          volumeHandler.ApiRedisDatesHandler),
+
+            # ── 系统健康监控 API ──────────────────────────────────────
+            (r"/api/system_health",        systemHandler.ApiSystemHealthHandler),
+            (r"/api/system_action",        systemHandler.ApiSystemActionHandler),
+
+            # ── 因子配置 API ──────────────────────────────────────────
+            (r"/api/factor_config",        volumeHandler.ApiFactorConfigHandler),
+
+            # ── 分钟K线查询 ────────────────────────────────────────────
+            (r"/api/minute_bars",          volumeHandler.ApiMinuteBarsHandler),
+            # ── 单股票因子计算 API ────────────────────────────────────
+            (r"/api/score_single",         volumeHandler.ApiScoreSingleHandler),
         ]
         settings = dict(  # 配置
             template_path=os.path.join(os.path.dirname(__file__), "templates"),

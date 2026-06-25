@@ -18,9 +18,27 @@ import instock.web.base as webBase
 import instock.lib.trade_time as trd
 import instock.lib.database as mdb
 import instock.core.tablestructure as tbs
+from instock.lib.singleton_type import singleton_type
 
 __author__ = 'myh '
 __date__ = '2024/1/1 '
+
+
+def _clear_singletons():
+    """清除所有 singleton_type 子类的缓存实例，防止跨日复用脏数据。"""
+    import instock.core.singleton_stock as ss
+    import instock.core.singleton_trade_date as std
+    import instock.core.singleton_stock_web_module_data as ssw
+    for mod in (ss, std, ssw):
+        for attr in dir(mod):
+            obj = getattr(mod, attr, None)
+            if isinstance(obj, type) and isinstance(obj, singleton_type):
+                try:
+                    if hasattr(obj, '_instance'):
+                        del obj._instance
+                except Exception:
+                    pass
+
 
 # ─── 全局状态 ────────────────────────────────────────────────────────────────
 _task_status: dict = {}
@@ -168,12 +186,12 @@ def _sync_stock_spot_by_date(task_key: str, start_date: str, end_date: str):
                 # ── 入库 ──────────────────────────────────────
                 table_name = tbs.TABLE_CN_STOCK_SPOT['name']
                 if mdb.checkTableIsExist(table_name):
-                    mdb.executeSql(f"DELETE FROM `{table_name}` WHERE `date` = '{trade_date}'")
+                    mdb.executeSql(f'DELETE FROM "{table_name}" WHERE "date" = \'{trade_date}\'')
                     cols_type = None
                 else:
                     cols_type = tbs.get_field_types(tbs.TABLE_CN_STOCK_SPOT['columns'])
 
-                mdb.insert_db_from_df(out, table_name, cols_type, False, '`date`,`code`')
+                mdb.insert_db_from_df(out, table_name, cols_type, False, '"date","code"')
                 _push(task_key, f'  ✅ 入库 {len(out)} 条 → {table_name}')
                 success_days += 1
 
@@ -317,6 +335,32 @@ def _run_task(task_key: str, job_info: dict, start_date: str, end_date: str):
             # 专用：股票行情直接按日拉 Tushare daily
             ok = _sync_stock_spot_by_date(task_key, start_date, end_date)
 
+        elif runner == 'his_stock':
+            # 专用：his-stock 历史1分钟K线文件导入
+            from instock.job.his_stock_importer import import_all
+            def _push_line(msg):
+                _push(task_key, msg)
+            import_all(push=_push_line)
+            ok = True
+
+        elif runner == 'sector_map':
+            # 专用：同步行业板块映射
+            from instock.job.sync_sector_map import run as sector_run
+            import logging as _lg
+            # 把日志输出重定向到 SSE 推送
+            class _PushHandler(logging.Handler):
+                def emit(self, record):
+                    _push(task_key, self.format(record))
+            handler = _PushHandler()
+            handler.setFormatter(logging.Formatter('%(message)s'))
+            slog = _lg.getLogger('instock.job.sync_sector_map')
+            slog.addHandler(handler)
+            try:
+                sector_run()
+            finally:
+                slog.removeHandler(handler)
+            ok = True
+
         elif runner == 'generic_single':
             # 通用：逐日调用 job_func(date)
             ok = _run_generic_job_with_dates(task_key, job_info['single_func'], start_date, end_date)
@@ -456,6 +500,24 @@ def _get_jobs():
             'runner': 'generic_single',
             'single_func': lambda d: _run_custom_strategies(d),
             'func': lambda: None,
+        },
+        {
+            'key': 'his_stock_import',
+            'group': '历史分钟数据',
+            'name': '导入 his-stock 历史1分钟K线',
+            'desc': '将 his-stock 文件夹中的历史1分钟K线数据全量导入数据库',
+            'icon': 'fa-upload',
+            'color': '#16a085',
+            'runner': 'his_stock',   # 特殊runner，不需要日期参数
+        },
+        {
+            'key': 'sync_sector_map',
+            'group': '板块数据',
+            'name': '同步行业板块映射（东财）',
+            'desc': '从东方财富爬取全部行业板块成分股，全量写入 cn_stock_sector_map，并刷新 Redis 板块缓存（约1-2分钟）',
+            'icon': 'fa-tags',
+            'color': '#1abc9c',
+            'runner': 'sector_map',
         },
     ]
 

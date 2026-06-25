@@ -33,7 +33,7 @@ def prepare(date):
         table_name = tbs.TABLE_CN_STOCK_KLINE_PATTERN['name']
         # 删除老数据。
         if mdb.checkTableIsExist(table_name):
-            del_sql = f"DELETE FROM `{table_name}` where `date` = '{date}'"
+            del_sql = f'DELETE FROM "{table_name}" WHERE "date" = \'{date}\' '
             mdb.executeSql(del_sql)
             cols_type = None
         else:
@@ -50,7 +50,7 @@ def prepare(date):
         date_str = date.strftime("%Y-%m-%d")
         if date.strftime("%Y-%m-%d") != data.iloc[0]['date']:
             data['date'] = date_str
-        mdb.insert_db_from_df(data, table_name, cols_type, False, "`date`,`code`")
+        mdb.insert_db_from_df(data, table_name, cols_type, False, '"date","code"')
 
     except Exception as e:
         logging.error(f"klinepattern_data_daily_job.prepare处理异常：{e}")

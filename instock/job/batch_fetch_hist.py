@@ -104,12 +104,13 @@ def _sync_one_day(trade_date: datetime.date) -> int:
         log.warning(f"  {date_disp}: 过滤后为空，跳过")
         return 0
 
-    # ── REPLACE INTO 写库（覆盖旧数据，修复换手率等字段）
+    # ── INSERT ON CONFLICT DO UPDATE 写库（覆盖旧数据，修复换手率等字段）
     cols  = ['date', 'code', 'open', 'close', 'high', 'low',
              'volume', 'amount', 'amplitude', 'quote_change', 'ups_downs', 'turnover']
-    ph    = ', '.join(['%s'] * len(cols))
-    cnames = ', '.join(f'`{c}`' for c in cols)
-    sql   = f"REPLACE INTO `{TABLE}` ({cnames}) VALUES ({ph})"
+    ph     = ', '.join(['%s'] * len(cols))
+    cnames = ', '.join(f'"{c}"' for c in cols)
+    updates = ', '.join(f'"{c}"=EXCLUDED."{c}"' for c in cols if c not in ('date', 'code'))
+    sql    = f'INSERT INTO "{TABLE}" ({cnames}) VALUES ({ph}) ON CONFLICT (date, code) DO UPDATE SET {updates}'
     rows  = [tuple(row) for row in out[cols].itertuples(index=False, name=None)]
 
     with mdb.get_connection() as conn:

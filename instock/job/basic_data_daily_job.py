@@ -31,13 +31,13 @@ def save_nph_stock_spot_data(date, before=True):
         table_name = tbs.TABLE_CN_STOCK_SPOT['name']
         # 删除老数据。
         if mdb.checkTableIsExist(table_name):
-            del_sql = f"DELETE FROM `{table_name}` where `date` = '{date}'"
+            del_sql = f'DELETE FROM "{table_name}" WHERE "date" = \'{date}\''
             mdb.executeSql(del_sql)
             cols_type = None
         else:
             cols_type = tbs.get_field_types(tbs.TABLE_CN_STOCK_SPOT['columns'])
 
-        mdb.insert_db_from_df(data, table_name, cols_type, False, "`date`,`code`")
+        mdb.insert_db_from_df(data, table_name, cols_type, False, '"date","code"')
 
     except Exception as e:
         logging.error(f"basic_data_daily_job.save_stock_spot_data处理异常：{e}")
@@ -56,13 +56,13 @@ def save_nph_etf_spot_data(date, before=True):
         table_name = tbs.TABLE_CN_ETF_SPOT['name']
         # 删除老数据。
         if mdb.checkTableIsExist(table_name):
-            del_sql = f"DELETE FROM `{table_name}` where `date` = '{date}'"
+            del_sql = f'DELETE FROM "{table_name}" WHERE "date" = \'{date}\''
             mdb.executeSql(del_sql)
             cols_type = None
         else:
             cols_type = tbs.get_field_types(tbs.TABLE_CN_ETF_SPOT['columns'])
 
-        mdb.insert_db_from_df(data, table_name, cols_type, False, "`date`,`code`")
+        mdb.insert_db_from_df(data, table_name, cols_type, False, '"date","code"')
     except Exception as e:
         logging.error(f"basic_data_daily_job.save_nph_etf_spot_data处理异常：{e}")
 

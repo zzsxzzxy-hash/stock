@@ -32,13 +32,13 @@ def save_nph_stock_selection_data(date, before=True):
         # 删除老数据。
         if mdb.checkTableIsExist(table_name):
             _date = data.iloc[0]['date']
-            del_sql = f"DELETE FROM `{table_name}` where `date` = '{_date}'"
+            del_sql = f'DELETE FROM "{table_name}" WHERE "date" = \'{_date}\' '
             mdb.executeSql(del_sql)
             cols_type = None
         else:
             cols_type = tbs.get_field_types(tbs.TABLE_CN_STOCK_SELECTION['columns'])
 
-        mdb.insert_db_from_df(data, table_name, cols_type, False, "`date`,`code`")
+        mdb.insert_db_from_df(data, table_name, cols_type, False, '"date","code"')
     except Exception as e:
         logging.error(f"selection_data_daily_job.save_nph_stock_selection_data处理异常：{e}")
 

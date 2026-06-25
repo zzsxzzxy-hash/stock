@@ -28,6 +28,13 @@
             :icon="PictureFilled"
             @click="openMinuteChart"
           >分时图</el-button>
+          <el-button
+            v-if="code"
+            size="small"
+            type="warning"
+            :icon="TrendCharts"
+            @click="openMinuteKline"
+          >1分钟K线</el-button>
           <el-radio-group v-model="period" size="small" @change="load" v-if="code">
             <el-radio-button value="daily">日K</el-radio-button>
             <el-radio-button value="weekly">周K</el-radio-button>
@@ -54,7 +61,36 @@
         <div ref="maRef" class="chart-container" style="height:120px" />
       </div>
     </el-card>
-    <!-- 分时图弹窗 -->
+    <!-- 1分钟K线弹窗 -->
+    <el-dialog
+      v-model="minuteKlineVisible"
+      :title="`${code} ${stockName} — 1分钟K线（${minuteKlineDate}）`"
+      width="940px"
+      :close-on-click-modal="true"
+      destroy-on-close
+    >
+      <!-- 日期选择 -->
+      <div class="mkline-toolbar">
+        <el-date-picker
+          v-model="minuteKlineDate"
+          type="date"
+          value-format="YYYY-MM-DD"
+          placeholder="选择日期"
+          style="width:180px"
+          @change="loadMinuteKline"
+        />
+        <el-button type="primary" size="small" :loading="mklineLoading" @click="loadMinuteKline">
+          加载
+        </el-button>
+        <el-text type="info" size="small" style="margin-left:auto">共 {{ mklineData.length }} 根K线</el-text>
+      </div>
+      <div v-if="mklineError" style="color:#f56c6c;font-size:12px;padding:4px 0">{{ mklineError }}</div>
+      <!-- 价格图 -->
+      <div ref="mklinePriceRef" class="mkline-chart" style="height:280px"></div>
+      <!-- 成交量图 -->
+      <div class="mkline-chart-label">成交量（手）</div>
+      <div ref="mklineVolRef" class="mkline-chart" style="height:100px"></div>
+    </el-dialog>
     <el-dialog
       v-model="minuteVisible"
       :title="`${code} ${stockName} — 分时图（${date}）`"
@@ -87,7 +123,7 @@
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { PictureFilled } from '@element-plus/icons-vue'
+import { PictureFilled, TrendCharts } from '@element-plus/icons-vue'
 import axios from 'axios'
 
 const route = useRoute()
@@ -112,6 +148,111 @@ let resizeOb    = null
 const periodLabel = computed(() =>
   ({ daily: '日K', weekly: '周K', monthly: '月K' }[period.value])
 )
+
+// ── 1分钟K线 ─────────────────────────────────────────────────────────────
+const minuteKlineVisible = ref(false)
+const minuteKlineDate    = ref('')
+const mklineLoading      = ref(false)
+const mklineError        = ref('')
+const mklineData         = ref([])
+const mklinePriceRef     = ref(null)
+const mklineVolRef       = ref(null)
+let   mklinePriceChart   = null
+let   mklineVolChart     = null
+
+function openMinuteKline() {
+  if (!code.value) { ElMessage.warning('请先输入股票代码'); return }
+  minuteKlineDate.value   = date.value || new Date().toISOString().slice(0, 10)
+  minuteKlineVisible.value = true
+  loadMinuteKline()
+}
+
+async function loadMinuteKline() {
+  if (!code.value || !minuteKlineDate.value) return
+  mklineLoading.value = true
+  mklineError.value   = ''
+  mklineData.value    = []
+  // 销毁旧图表
+  ;[mklinePriceChart, mklineVolChart].forEach(c => { if (c) { try { c.remove() } catch(_) {} } })
+  mklinePriceChart = mklineVolChart = null
+
+  try {
+    const res = await axios.get('/api/minute_kline', {
+      params: { code: code.value, date: minuteKlineDate.value }
+    })
+    const raw = res.data
+    if (!Array.isArray(raw) || raw.length === 0) {
+      mklineError.value = `${minuteKlineDate.value} 无1分钟K线数据（该日期未入库）`
+      return
+    }
+    mklineData.value = raw
+    await nextTick()
+    await buildMinuteKlineChart(raw)
+  } catch (e) {
+    mklineError.value = '加载失败：' + (e.response?.data?.error || e.message)
+  } finally {
+    mklineLoading.value = false
+  }
+}
+
+async function buildMinuteKlineChart(raw) {
+  const lc = await getLWC()
+  const { createChart, ColorType, CrosshairMode, CandlestickSeries, HistogramSeries } = lc
+
+  const w = mklinePriceRef.value ? mklinePriceRef.value.clientWidth : 860
+
+  // 1分钟K线用时间字符串作为类目轴（避免lightweight-charts自动跳过非交易时段间隔）
+  // 转为 Unix 时间戳（lightweight-charts 要求）
+  const baseDate   = minuteKlineDate.value  // YYYY-MM-DD
+  function toTs(timeStr) {  // '09:31' → unix seconds
+    const [h, m] = timeStr.split(':').map(Number)
+    return Math.floor(new Date(`${baseDate}T${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:00+08:00`).getTime() / 1000)
+  }
+
+  const candleData = raw.map(d => ({
+    time:  toTs(d.time),
+    open:  d.open,
+    high:  d.high,
+    low:   d.low,
+    close: d.close,
+  }))
+  const volData = raw.map(d => ({
+    time:  toTs(d.time),
+    value: d.volume,
+    color: d.close >= d.open ? UP_COLOR + 'aa' : DOWN_COLOR + 'aa',
+  }))
+
+  const baseOpt = (height) => ({
+    width: w, height,
+    layout: { background: { type: ColorType.Solid, color: '#ffffff' }, textColor: '#666', fontSize: 11 },
+    grid:   { vertLines: { color: '#f0f0f0' }, horzLines: { color: '#f0f0f0' } },
+    crosshair: { mode: CrosshairMode.Normal },
+    rightPriceScale: { borderColor: '#e0e0e0', scaleMargins: { top: 0.08, bottom: 0.08 } },
+    timeScale: { borderColor: '#e0e0e0', timeVisible: true, secondsVisible: false,
+                 rightOffset: 3, barSpacing: 6 },
+    handleScroll: true, handleScale: true,
+  })
+
+  mklinePriceChart = createChart(mklinePriceRef.value, baseOpt(280))
+  const cs = mklinePriceChart.addSeries(CandlestickSeries, {
+    upColor: UP_COLOR, downColor: DOWN_COLOR,
+    borderUpColor: UP_COLOR, borderDownColor: DOWN_COLOR,
+    wickUpColor: UP_COLOR, wickDownColor: DOWN_COLOR,
+  })
+  cs.setData(candleData)
+  mklinePriceChart.timeScale().fitContent()
+
+  mklineVolChart = createChart(mklineVolRef.value, {
+    ...baseOpt(100),
+    rightPriceScale: { borderColor: '#e0e0e0', scaleMargins: { top: 0.1, bottom: 0 } },
+  })
+  const vs = mklineVolChart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' } })
+  vs.setData(volData)
+  mklineVolChart.timeScale().fitContent()
+
+  // 同步横轴
+  syncTimeScale([mklinePriceChart, mklineVolChart])
+}
 
 // ── 分时图 ────────────────────────────────────────────────────────────────
 const minuteVisible = ref(false)
@@ -388,4 +529,9 @@ onUnmounted(destroyCharts)
 .minute-img-row { display: flex; justify-content: center; background: #fafafa; border-radius: 4px; padding: 8px; }
 .minute-img { max-width: 100%; height: auto; border-radius: 2px; }
 .minute-tip { display: flex; align-items: center; justify-content: space-between; padding: 0 2px; }
+
+/* 1分钟K线弹窗 */
+.mkline-toolbar { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+.mkline-chart { width:100%; border:1px solid #f0f0f0; border-radius:4px; overflow:hidden; }
+.mkline-chart-label { font-size:12px; color:#909399; margin:6px 0 4px; }
 </style>

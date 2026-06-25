@@ -1,5 +1,7 @@
 <template>
   <div class="sync-page">
+    <el-tabs v-model="activeTab">
+      <el-tab-pane label="数据同步" name="sync">
     <el-alert
       v-if="globalRunning"
       title="同步任务正在执行中，请稍候..."
@@ -29,6 +31,7 @@
             </template>
 
             <el-form label-width="60px" size="small">
+              <template v-if="!task.noDate">
               <el-form-item label="开始">
                 <el-date-picker
                   v-model="task.startDate"
@@ -47,6 +50,13 @@
                   style="width:100%"
                 />
               </el-form-item>
+              </template>
+              <template v-else>
+                <div class="no-date-tip">
+                  <el-icon><FolderOpened /></el-icon>
+                  自动读取 his-stock 目录，无需选择日期
+                </div>
+              </template>
             </el-form>
 
             <el-button
@@ -81,6 +91,18 @@
         <div v-if="!logs.length" class="log-empty">暂无日志</div>
       </div>
     </el-card>
+      </el-tab-pane>
+
+      <!-- 板块维护 tab -->
+      <el-tab-pane label="板块维护" name="sectors">
+        <SectorManager />
+      </el-tab-pane>
+
+      <!-- Redis 查询 tab -->
+      <el-tab-pane label="Redis查询" name="redis">
+        <RedisQuery />
+      </el-tab-pane>
+    </el-tabs>
   </div>
 </template>
 
@@ -88,6 +110,11 @@
 import { ref, computed, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { triggerSync } from '@/api'
+import { FolderOpened } from '@element-plus/icons-vue'
+import SectorManager from '@/components/SectorManager.vue'
+import RedisQuery from '@/components/RedisQuery.vue'
+
+const activeTab = ref('sync')
 
 const today = new Date().toISOString().slice(0, 10)
 
@@ -105,6 +132,8 @@ const tasks = ref([
   { key: 'backtest',         name: '策略回测（1~60日收益）',  group: '策略选股数据', startDate: today, endDate: today },
   // ── 自有策略
   { key: 'custom_strategy',  name: '自有策略（爆量股票等）',  group: '自有策略',    startDate: today, endDate: today },
+  // ── 历史分钟数据
+  { key: 'his_stock_import', name: '导入 his-stock 历史1分钟K线', group: '历史分钟数据', startDate: null, endDate: null, noDate: true },
 ])
 
 // 按 group 分组
@@ -160,7 +189,7 @@ function appendLog(line) {
 }
 
 async function runTask(task) {
-  if (!task.startDate || !task.endDate) {
+  if (!task.noDate && (!task.startDate || !task.endDate)) {
     ElMessage.warning('请选择开始和结束日期')
     return
   }
@@ -171,10 +200,10 @@ async function runTask(task) {
 
   try {
     const res = await triggerSync(task.key, task.startDate, task.endDate)
-    const taskKey = res.data.task_key
+    const taskKey = res.data.key
 
     await new Promise((resolve) => {
-      const es = new EventSource(`/instock/api/sync/log?task_key=${taskKey}`)
+      const es = new EventSource(`/instock/api/sync/log?key=${taskKey}`)
       es.onmessage = (e) => {
         if (e.data === '__DONE__') { es.close(); resolve(); return }
         appendLog(e.data)
@@ -231,4 +260,6 @@ async function runTask(task) {
 .log-success { color: #4ec9b0; }
 .log-warn    { color: #dcdcaa; }
 .log-empty   { color: #555; font-style: italic; }
+.no-date-tip { display:flex; align-items:center; gap:6px; color:#909399; font-size:12px;
+  padding:10px 0; }
 </style>
