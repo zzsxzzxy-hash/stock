@@ -59,6 +59,7 @@ class Application(tornado.web.Application):
             (r"/api/data",        apiHandler.ApiDataHandler),
             (r"/api/trade_date",  apiHandler.ApiTradeDateHandler),
             (r"/api/watchlist",   apiHandler.ApiWatchlistHandler),
+            (r"/api/operation_log", apiHandler.ApiOperationLogHandler),
             (r"/api/custom_strategy", apiHandler.ApiCustomStrategyHandler),
             (r"/api/sina_realtime",         apiHandler.ApiSinaRealtimeHandler),
             (r"/instock/api_data/kline",    apiHandler.ApiKlineHandler),
@@ -67,11 +68,20 @@ class Application(tornado.web.Application):
             # ── 量能监控 API ───────────────────────────────────────────
             (r"/api/volume_rank",          volumeHandler.ApiVolumeRankHandler),
             (r"/api/volume_detail",        volumeHandler.ApiVolumeDetailHandler),
+            (r"/api/leader_strength",      volumeHandler.ApiLeaderStrengthHandler),
+            (r"/api/mainline_core",        volumeHandler.ApiMainlineCoreHandler),
+            (r"/api/stock_signal_detail",  volumeHandler.ApiStockSignalDetailHandler),
             (r"/api/sector_list",          volumeHandler.ApiSectorListHandler),
             (r"/api/sector_stocks",        volumeHandler.ApiSectorStocksHandler),
             (r"/api/sector_map",           volumeHandler.ApiSectorMapHandler),
             (r"/api/sector_map/batch",     volumeHandler.ApiSectorMapBatchHandler),
             (r"/api/sector_map/stock",     volumeHandler.ApiSectorMapStockHandler),
+            (r"/api/trade_theme/stock", volumeHandler.ApiTradeThemeStockHandler),
+            (r"/api/trade_theme_list", volumeHandler.ApiTradeThemeListHandler),
+            (r"/api/trade_theme_stocks", volumeHandler.ApiTradeThemeStocksHandler),
+            (r"/api/dominant_sector/stock", volumeHandler.ApiTradeThemeStockHandler),
+            (r"/api/dominant_sector_list", volumeHandler.ApiTradeThemeListHandler),
+            (r"/api/dominant_sector_stocks", volumeHandler.ApiTradeThemeStocksHandler),
 
             # ── Redis 查询 API ────────────────────────────────────────
             (r"/api/redis_query",          volumeHandler.ApiRedisQueryHandler),
@@ -80,6 +90,7 @@ class Application(tornado.web.Application):
             # ── 系统健康监控 API ──────────────────────────────────────
             (r"/api/system_health",        systemHandler.ApiSystemHealthHandler),
             (r"/api/system_action",        systemHandler.ApiSystemActionHandler),
+            (r"/api/system_action_status", systemHandler.ApiSystemActionStatusHandler),
 
             # ── 因子配置 API ──────────────────────────────────────────
             (r"/api/factor_config",        volumeHandler.ApiFactorConfigHandler),

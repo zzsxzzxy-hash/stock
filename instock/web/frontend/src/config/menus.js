@@ -7,6 +7,7 @@ export const menuModules = [
       { name: '爆量股票', table: 'cn_stock_strategy_volume_surge', realtime: false, custom: true },
     ],
     extraRoutes: [
+      { name: '龙头强势', path: '/leader_strength' },
       { name: '量能因子配置', path: '/factor_config' },
     ]
   },

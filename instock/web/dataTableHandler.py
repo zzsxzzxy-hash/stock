@@ -7,6 +7,7 @@ from abc import ABC
 from tornado import gen
 # import logging
 import datetime
+import decimal
 import instock.lib.trade_time as trd
 import instock.core.singleton_stock_web_module_data as sswmd
 import instock.web.base as webBase
@@ -28,6 +29,8 @@ class MyEncoder(json.JSONEncoder):
             return obj.strftime('%Y-%m-%d %H:%M:%S')
         elif isinstance(obj, datetime.date):
             return obj.strftime('%Y-%m-%d')
+        elif isinstance(obj, decimal.Decimal):
+            return float(obj)
         else:
             return json.JSONEncoder.default(self, obj)
 

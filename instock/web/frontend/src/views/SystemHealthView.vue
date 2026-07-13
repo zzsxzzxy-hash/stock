@@ -206,6 +206,7 @@ const ACTION_LABELS = {
   restart_daemon:  '重启Daemon',
   run_pre_calc:    '触发预计算',
   fill_minute_bars:'补全K线',
+  fill_today_minute_bars: '补全今日K线',
   refresh_rank:    '刷新排行',
   reload_sectors:  '重载板块',
   sync_stock_spot: '同步行情',

@@ -4,9 +4,11 @@
 量能监控后台调度服务（重构版）
 
 调度规则：
+  09:20以后       兜底检查上一交易日 cn_stock_hist_data / cn_stock_spot
   09:25          预计算（120日均线 + 位置分类），每天只做一次
   09:15~11:35    每分钟采集一次全市场分钟K线（XTick /doc/order/minute?code=all）
   12:59~15:05    每分钟采集一次全市场分钟K线
+  15:35以后       自动同步当天 cn_stock_hist_data / cn_stock_spot
   采集后刷新评分排行缓存
 
 启动时检查：
@@ -33,6 +35,63 @@ log = logging.getLogger(__name__)
 _running = True
 _pre_calc_done_today = ''  # 已完成预计算的日期
 _fill_done_today     = ''  # 已完成补全检查的日期
+_daily_precheck_done_today = ''  # 已完成开盘前兜底检查的日期
+_daily_after_close_done_today = ''  # 已完成收盘后每日表同步的日期
+_daily_sync_running = False
+
+DAILY_PRECHECK_TIME = datetime.time(9, 20)
+DAILY_AFTER_CLOSE_SYNC_TIME = datetime.time(15, 35)
+
+
+# ── 每日行情表同步 ─────────────────────────────────────────────────────────
+
+def _previous_market_date(date_str: str) -> str:
+    """
+    获取上一交易日日期。优先从分钟K线找真实有数据的上一天，
+    兜底用工作日回退，避免节假日/补班时完全不可用。
+    """
+    try:
+        import instock.lib.database as mdb
+        rows = mdb.executeSqlFetch(
+            'SELECT MAX("date") FROM cn_stock_minute_bar WHERE "date" < %s',
+            (date_str,)
+        )
+        if rows and rows[0][0]:
+            return str(rows[0][0])
+    except Exception as e:
+        log.warning("查询上一分钟K交易日失败，使用工作日兜底: %s", e)
+
+    d = datetime.date.fromisoformat(date_str) - datetime.timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= datetime.timedelta(days=1)
+    return d.strftime('%Y-%m-%d')
+
+
+def _ensure_daily_tables(date_str: str, reason: str):
+    """确保指定日期 cn_stock_hist_data / cn_stock_spot 不缺。"""
+    global _daily_sync_running
+    if _daily_sync_running:
+        log.info("每日行情表同步已在运行，跳过本次触发: %s %s", reason, date_str)
+        return
+
+    _daily_sync_running = True
+    try:
+        from instock.job.daily_market_sync import ensure_daily_tables
+        log.info("[%s] 开始每日行情表同步检查: %s", reason, date_str)
+        result = ensure_daily_tables(date_str)
+        log.info(
+            "[%s] 每日行情表同步完成: %s hist %s→%s, spot %s→%s",
+            reason,
+            date_str,
+            result['before']['hist'],
+            result['after']['hist'],
+            result['before']['spot'],
+            result['after']['spot'],
+        )
+    except Exception as e:
+        log.error("[%s] 每日行情表同步失败(%s): %s", reason, date_str, e, exc_info=True)
+    finally:
+        _daily_sync_running = False
 
 
 # ── 预计算 ─────────────────────────────────────────────────────────────────
@@ -103,6 +162,8 @@ def _do_refresh_rank(date_str: str, hhmm: str):
 # ── 主循环 ─────────────────────────────────────────────────────────────────
 
 def run():
+    global _daily_precheck_done_today, _daily_after_close_done_today
+
     log.info("量能监控调度服务启动")
 
     last_collect_minute = ''   # 上次采集的分钟（每分钟只采集一次）
@@ -124,6 +185,22 @@ def run():
         if not (is_collect_window(t) or t >= PRE_CALC_TIME):
             time.sleep(10)
             continue
+
+        # ── 09:20 以后兜底检查上一交易日每日表 ───────────────────────────────
+        # 主路径在当天收盘后同步；这里仅防止昨日收盘后机器未运行或接口失败。
+        if (
+            DAILY_PRECHECK_TIME <= t < datetime.time(10, 0)
+            and _daily_precheck_done_today != date_str
+            and not _daily_sync_running
+        ):
+            _daily_precheck_done_today = date_str
+            prev_date = _previous_market_date(date_str)
+            log.info("[%s] 触发上一交易日每日表兜底检查: %s", hhmm, prev_date)
+            threading.Thread(
+                target=_ensure_daily_tables,
+                args=(prev_date, 'pre_open_fallback'),
+                daemon=True
+            ).start()
 
         # ── 09:25 预计算 ─────────────────────────────────────────────────
         if t >= PRE_CALC_TIME and t.hour == 9 and t.minute == 25 and now.second < 5:
@@ -163,6 +240,20 @@ def run():
                     args=(date_str, hhmm),
                     daemon=True
                 ).start()
+
+        # ── 15:35 收盘后同步当天日线/现货表 ───────────────────────────────
+        if (
+            t >= DAILY_AFTER_CLOSE_SYNC_TIME
+            and _daily_after_close_done_today != date_str
+            and not _daily_sync_running
+        ):
+            _daily_after_close_done_today = date_str
+            log.info("[%s] 触发收盘后每日表同步: %s", hhmm, date_str)
+            threading.Thread(
+                target=_ensure_daily_tables,
+                args=(date_str, 'after_close'),
+                daemon=True
+            ).start()
 
         time.sleep(1)
 

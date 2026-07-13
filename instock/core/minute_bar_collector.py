@@ -21,6 +21,26 @@ import instock.lib.database as mdb
 
 log = logging.getLogger(__name__)
 
+
+def _is_a_stock_code(code: str) -> bool:
+    """只保留真实A股股票代码，过滤 899xxx 等指数/市场代码。"""
+    code = str(code or '').zfill(6)
+    return code.startswith(('0', '3', '6')) or code.startswith('920')
+
+
+def _collect_cutoff(now: datetime.datetime) -> str:
+    """返回本次采集允许写入的最晚分钟，避免午休/盘前写入未来分钟。"""
+    hhmm = now.strftime('%H:%M')
+    if '11:30' < hhmm < '13:00':
+        return '11:30'
+    return hhmm
+
+
+def _is_allowed_bar_time(t: str, cutoff: str) -> bool:
+    if not t or t > cutoff:
+        return False
+    return ('09:15' <= t <= '11:30') or ('13:00' <= t <= '15:00')
+
 # ── Redis 配置 ─────────────────────────────────────────────────────────────
 REDIS_HOST = os.environ.get('REDIS_HOST', 'localhost')
 REDIS_PORT = int(os.environ.get('REDIS_PORT', 6379))
@@ -303,10 +323,18 @@ def collect_once():
     date  = now.strftime('%Y-%m-%d')
     t_str = now.strftime('%H:%M')
 
-    bars = _fetcher.fetch_latest()
+    raw_bars = _fetcher.fetch_latest()
+    cutoff = _collect_cutoff(now)
+    bars = [
+        b for b in raw_bars
+        if _is_a_stock_code(b.get('code')) and _is_allowed_bar_time(b.get('time'), cutoff)
+    ]
+    dropped = len(raw_bars) - len(bars)
     if not bars:
         log.debug(f"[{t_str}] /doc/order/minute 返回空")
         return 0
+    if dropped:
+        log.info(f"[{t_str}] 过滤非股票/未来分钟数据: {dropped}条 cutoff={cutoff}")
 
     by_code: dict[str, list] = {}
     for b in bars:
@@ -340,7 +368,8 @@ def check_and_fill_today(date: str = None):
     import instock.lib.database as mdb
 
     now          = datetime.datetime.now()
-    date         = date or now.strftime('%Y-%m-%d')
+    today        = now.strftime('%Y-%m-%d')
+    date         = date or today
     current_time = now.strftime('%H:%M')
 
     if current_time < '09:32':
@@ -353,7 +382,12 @@ def check_and_fill_today(date: str = None):
 
     # Step 1: 从全推接口获取当前活跃股票列表
     log.info(f"[{current_time}] 开始分钟数据完整性检查...")
-    latest_bars = _fetcher.fetch_latest()
+    latest_raw = _fetcher.fetch_latest()
+    cutoff = _collect_cutoff(now)
+    latest_bars = [
+        b for b in latest_raw
+        if _is_a_stock_code(b.get('code')) and _is_allowed_bar_time(b.get('time'), cutoff)
+    ]
     active_codes = list({b['code'] for b in latest_bars}) if latest_bars else []
 
     if not active_codes:
@@ -391,7 +425,10 @@ def check_and_fill_today(date: str = None):
         batch = missing[i:i + batch_size]
         for code in batch:
             try:
-                bars = _fetcher.fetch_single_realtime(code)
+                if date == today:
+                    bars = _fetcher.fetch_single_realtime(code)
+                else:
+                    bars = _fetcher.fetch_history(code, date)
                 if not bars:
                     continue
                 # 只保留交易时段内数据

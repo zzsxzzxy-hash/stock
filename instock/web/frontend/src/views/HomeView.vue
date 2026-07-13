@@ -88,14 +88,49 @@
               v-if="row.action"
               :type="row.ok ? 'default' : 'primary'"
               size="small"
-              :loading="actionLoading[row.action]"
+              :loading="isActionLoading(row.action)"
+              :disabled="isActionDisabled(row.action)"
               @click="doAction(row.action, row.name)"
             >
-              {{ actionLabel(row.action) }}
+              {{ actionButtonLabel(row.action) }}
             </el-button>
           </template>
         </el-table-column>
       </el-table>
+
+      <div v-if="gname === '每日数据' && minuteFillPanelVisible" class="task-panel">
+        <div class="task-panel-head">
+          <div class="task-title">
+            <span>补全今日K线进度</span>
+            <el-tag :type="minuteFillTagType" size="small" effect="light">
+              {{ minuteFillStatusLabel }}
+            </el-tag>
+          </div>
+          <div class="task-message">{{ minuteFillTask?.message || '-' }}</div>
+        </div>
+        <el-progress
+          :percentage="minuteFillProgress"
+          :status="minuteFillProgressStatus"
+          :stroke-width="8"
+        />
+        <div class="task-meta">
+          <span>开始 {{ minuteFillTask?.started_at || '-' }}</span>
+          <span>更新 {{ minuteFillTask?.updated_at || '-' }}</span>
+          <span>阶段 {{ minuteFillTask?.stage || '-' }}</span>
+        </div>
+        <div ref="minuteFillLogEl" class="task-log">
+          <div
+            v-for="item in minuteFillLogs"
+            :key="item.seq"
+            class="task-log-line"
+            :class="`log-${item.level || 'info'}`"
+          >
+            <span class="log-time">{{ item.time }}</span>
+            <span class="log-progress">{{ item.progress }}%</span>
+            <span class="log-message">{{ item.message }}</span>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- 加载失败 -->
@@ -106,7 +141,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Refresh, CircleCheck, CircleClose, Warning,
@@ -117,19 +152,23 @@ const data          = ref(null)
 const loading       = ref(false)
 const autoRefresh   = ref(false)
 const actionLoading = ref({})
+const minuteFillTask = ref(null)
+const minuteFillLogEl = ref(null)
 let   timer         = null
+let   minuteFillTimer = null
+let   lastSilentHealthAt = 0
 
-async function fetchHealth() {
-  loading.value = true
+async function fetchHealth(silent = false) {
+  if (!silent) loading.value = true
   try {
     const res = await fetch('/api/system_health')
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
     data.value = await res.json()
   } catch (e) {
-    data.value = null
-    ElMessage.error(`获取状态失败: ${e.message}`)
+    if (!silent) data.value = null
+    if (!silent) ElMessage.error(`获取状态失败: ${e.message}`)
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
 }
 
@@ -138,8 +177,14 @@ function toggleAutoRefresh(val) {
   if (val) timer = setInterval(fetchHealth, 30000)
 }
 
-onMounted(() => fetchHealth())
-onUnmounted(() => clearInterval(timer))
+onMounted(() => {
+  fetchHealth()
+  fetchMinuteFillStatus(true)
+})
+onUnmounted(() => {
+  clearInterval(timer)
+  stopMinuteFillPolling()
+})
 
 const groupedChecks = computed(() => {
   if (!data.value) return {}
@@ -152,16 +197,19 @@ const groupedChecks = computed(() => {
 })
 
 function statusType(row) {
+  if (row.running) return 'primary'
   if (row.ok && !row.warn) return 'success'
   if (row.warn) return 'warning'
   return 'danger'
 }
 function statusLabel(row) {
+  if (row.running) return '运行中'
   if (row.ok && !row.warn) return '正常'
   if (row.warn) return '警告'
   return '异常'
 }
 function rowClass({ row }) {
+  if (row.running) return 'row-running'
   if (!row.ok && !row.warn && row.required) return 'row-error'
   if (row.warn) return 'row-warn'
   return ''
@@ -200,6 +248,7 @@ const ACTION_LABELS = {
   restart_daemon:    '重启Daemon',
   run_pre_calc:      '触发预计算',
   fill_minute_bars:  '补全K线',
+  fill_today_minute_bars: '补全今日K线',
   refresh_rank:      '刷新排行',
   reload_sectors:    '同步板块数据',
   sync_stock_spot:   '同步行情',
@@ -208,6 +257,93 @@ const ACTION_LABELS = {
 }
 function actionLabel(action) {
   return ACTION_LABELS[action] || '执行'
+}
+function actionButtonLabel(action) {
+  if (action === 'fill_today_minute_bars' && minuteFillRunning.value) return '补全中'
+  return actionLabel(action)
+}
+function isActionLoading(action) {
+  return !!actionLoading.value[action] || (action === 'fill_today_minute_bars' && minuteFillRunning.value)
+}
+function isActionDisabled(action) {
+  return action === 'fill_today_minute_bars' && minuteFillRunning.value
+}
+
+const minuteFillRunning = computed(() => !!minuteFillTask.value?.running)
+const minuteFillLogs = computed(() => minuteFillTask.value?.logs || [])
+const minuteFillPanelVisible = computed(() => {
+  const task = minuteFillTask.value
+  return !!(task && (task.running || (task.logs && task.logs.length > 0)))
+})
+const minuteFillProgress = computed(() => {
+  const n = Number(minuteFillTask.value?.progress || 0)
+  return Math.max(0, Math.min(100, Math.round(n)))
+})
+const minuteFillStatusLabel = computed(() => {
+  const task = minuteFillTask.value
+  if (!task) return '未运行'
+  if (task.running) return '运行中'
+  if (task.stage === 'incomplete') return '仍不完整'
+  if (task.ok === true) return '已完成'
+  if (task.ok === false) return '失败'
+  return '未运行'
+})
+const minuteFillTagType = computed(() => {
+  const task = minuteFillTask.value
+  if (!task) return 'info'
+  if (task.running) return 'primary'
+  if (task.stage === 'incomplete') return 'warning'
+  if (task.ok === true) return 'success'
+  if (task.ok === false) return 'danger'
+  return 'info'
+})
+const minuteFillProgressStatus = computed(() => {
+  if (minuteFillTask.value?.stage === 'incomplete') return 'warning'
+  if (minuteFillTask.value?.ok === true) return 'success'
+  if (minuteFillTask.value?.ok === false) return 'exception'
+  return ''
+})
+
+function stopMinuteFillPolling() {
+  clearInterval(minuteFillTimer)
+  minuteFillTimer = null
+}
+
+function startMinuteFillPolling() {
+  if (minuteFillTimer) return
+  minuteFillTimer = setInterval(() => fetchMinuteFillStatus(true), 1500)
+}
+
+function scrollMinuteFillLog() {
+  nextTick(() => {
+    const el = minuteFillLogEl.value
+    if (el) el.scrollTop = el.scrollHeight
+  })
+}
+
+async function fetchMinuteFillStatus(silent = false) {
+  try {
+    const res = await fetch('/api/system_action_status?action=fill_today_minute_bars')
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    const json = await res.json()
+    if (json.ok && json.task) {
+      minuteFillTask.value = json.task
+      scrollMinuteFillLog()
+      if (json.task.running) {
+        startMinuteFillPolling()
+        const now = Date.now()
+        if (now - lastSilentHealthAt > 5000) {
+          lastSilentHealthAt = now
+          fetchHealth(true)
+        }
+      } else {
+        stopMinuteFillPolling()
+        fetchHealth(true)
+      }
+    }
+  } catch (e) {
+    if (!silent) ElMessage.error(`获取补全进度失败: ${e.message}`)
+  }
 }
 
 async function doAction(action, name) {
@@ -230,7 +366,13 @@ async function doAction(action, name) {
     const json = await res.json()
     if (json.ok) {
       ElMessage.success(json.msg || '操作成功')
-      setTimeout(fetchHealth, 3000)
+      if (action === 'fill_today_minute_bars') {
+        if (json.task) minuteFillTask.value = json.task
+        scrollMinuteFillLog()
+        startMinuteFillPolling()
+        fetchHealth(true)
+      }
+      setTimeout(() => fetchHealth(), 3000)
     } else {
       ElMessage.error(json.msg || '操作失败')
     }
@@ -282,7 +424,70 @@ async function doAction(action, name) {
 
 :deep(.row-error) td { background: #fff0f0 !important; }
 :deep(.row-warn)  td { background: #fffbf0 !important; }
+:deep(.row-running) td { background: #ecf5ff !important; }
 
 .detail-text { font-size: 12px; color: #606266; word-break: break-all; }
 .detail-err  { color: #f56c6c; font-weight: 500; }
+
+.task-panel {
+  border: 1px solid #dcdfe6;
+  border-top: 0;
+  padding: 12px 14px 14px;
+  background: #fbfdff;
+}
+.task-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+.task-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+  white-space: nowrap;
+}
+.task-message {
+  flex: 1;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #606266;
+  text-align: right;
+  word-break: break-all;
+}
+.task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 8px 0;
+  font-size: 12px;
+  color: #909399;
+}
+.task-log {
+  height: 180px;
+  overflow: auto;
+  border: 1px solid #ebeef5;
+  background: #ffffff;
+  padding: 6px 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.task-log-line {
+  display: grid;
+  grid-template-columns: 64px 44px minmax(0, 1fr);
+  column-gap: 8px;
+  color: #606266;
+  border-bottom: 1px solid #f5f7fa;
+}
+.task-log-line:last-child { border-bottom: 0; }
+.log-time { color: #909399; }
+.log-progress { color: #409eff; text-align: right; }
+.log-message { word-break: break-all; }
+.log-warning .log-message { color: #b88230; }
+.log-error .log-message { color: #f56c6c; }
 </style>

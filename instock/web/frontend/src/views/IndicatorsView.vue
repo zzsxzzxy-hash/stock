@@ -53,7 +53,7 @@
         <el-empty description="输入股票代码并选择日期后点击加载" />
       </div>
       <div v-show="chartReady">
-        <div class="chart-title">{{ code }} {{ stockName }} — K线图（{{ periodLabel }}）</div>
+        <div class="chart-title">{{ code }} {{ stockName }} — K线图（{{ periodLabel }}{{ displayRangeText }}）</div>
         <div ref="candleRef" class="chart-container" style="height:360px" />
         <div class="chart-subtitle">成交量</div>
         <div ref="volumeRef" class="chart-container" style="height:120px" />
@@ -130,6 +130,7 @@ const route = useRoute()
 
 const code       = ref('')
 const date       = ref('')
+const startDate  = ref('')
 const stockName  = ref('')
 const period     = ref('daily')
 const loading    = ref(false)
@@ -148,6 +149,22 @@ let resizeOb    = null
 const periodLabel = computed(() =>
   ({ daily: '日K', weekly: '周K', monthly: '月K' }[period.value])
 )
+const displayRangeText = computed(() => {
+  if (period.value !== 'daily' || !startDate.value || !date.value) return ''
+  return ` · ${startDate.value} 至 ${date.value}`
+})
+
+function toDateString(d) {
+  return d.toISOString().slice(0, 10)
+}
+
+function minusMonths(dateStr, months) {
+  const d = dateStr ? new Date(`${dateStr}T00:00:00+08:00`) : new Date()
+  const day = d.getDate()
+  d.setMonth(d.getMonth() - months)
+  if (d.getDate() !== day) d.setDate(0)
+  return toDateString(d)
+}
 
 // ── 1分钟K线 ─────────────────────────────────────────────────────────────
 const minuteKlineVisible = ref(false)
@@ -461,6 +478,7 @@ async function buildCharts(raw) {
 async function load() {
   if (!code.value)  { ElMessage.warning('请输入股票代码'); return }
   if (!date.value)  { ElMessage.warning('请选择日期');    return }
+  startDate.value = period.value === 'daily' ? minusMonths(date.value, 3) : ''
 
   loading.value  = true
   errMsg.value   = ''
@@ -469,7 +487,12 @@ async function load() {
 
   try {
     const res = await axios.get('/instock/api_data/kline', {
-      params: { code: code.value, date: date.value, period: period.value },
+      params: {
+        code: code.value,
+        date: date.value,
+        period: period.value,
+        ...(startDate.value ? { start_date: startDate.value } : {}),
+      },
     })
     const raw = res.data
     if (!Array.isArray(raw) || raw.length === 0) {

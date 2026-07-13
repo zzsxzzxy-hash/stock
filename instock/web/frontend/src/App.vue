@@ -35,6 +35,20 @@
             <template #title>我的关注</template>
           </el-menu-item>
 
+          <!-- 固定项：操作策略 -->
+          <el-sub-menu index="operation_group">
+            <template #title>
+              <el-icon><Operation /></el-icon>
+              <span>操作策略</span>
+            </template>
+            <el-menu-item index="/operation_strategy">
+              <span>超短主线接力</span>
+            </el-menu-item>
+            <el-menu-item index="/operation_journal">
+              <span>每日操作记录</span>
+            </el-menu-item>
+          </el-sub-menu>
+
           <!-- 固定项：量能监控（在自有策略同级插入）-->
           <el-sub-menu index="volume_group">
             <template #title>
@@ -43,6 +57,9 @@
             </template>
             <el-menu-item index="/volume_monitor">
               <span>量能异动监控</span>
+            </el-menu-item>
+            <el-menu-item index="/leader_strength">
+              <span>龙头强势</span>
             </el-menu-item>
             <el-menu-item
               v-for="item in customStrategyItems"
@@ -127,8 +144,11 @@ const pageTitle = computed(() => {
   if (path === '/') return '首页'
   if (path === '/sync') return '数据同步管理'
   if (path === '/watchlist') return '我的关注'
+  if (path === '/operation_strategy') return '超短主线接力'
+  if (path === '/operation_journal') return '每日操作记录'
   if (path === '/indicators') return 'K线指标图表'
   if (path === '/volume_monitor') return '量能异动监控'
+  if (path === '/leader_strength') return '龙头强势'
   if (path === '/system_health') return '系统运行监控'
   if (path === '/factor_config') return '量能因子配置'
   if (path === '/score_single')  return '单股票计算'

@@ -48,11 +48,13 @@ const props = defineProps({
   code: { type: String, required: true },
   date: { type: String, required: true },
   bars: { type: Array,  default: () => [] },
+  compareDate: { type: String, default: '' },
+  compareBars: { type: Array, default: () => [] },
 })
 
 const chartType = ref('both')
-const cmpDate   = ref('')
-const cmpBars   = ref([])
+const cmpDate   = ref(props.compareDate || '')
+const cmpBars   = ref(props.compareBars || [])
 const loading   = ref(false)
 const chartEl   = ref(null)
 let chart = null
@@ -78,15 +80,24 @@ function toMap(bars) {
 }
 
 // ── 计算分时涨跌幅序列 + 量序列 ──────────────────────────────────────────
+function detectBase(bars) {
+  const sorted = [...(bars || [])].sort((a, b) => String(a.time || '').localeCompare(String(b.time || '')))
+  const preOpen = sorted.find(b => b?.time && b.time <= '09:30' && Number(b.pre_close) > 0)
+  if (preOpen) return Number(preOpen.pre_close)
+  const firstStable = sorted.find(b => b?.time && b.time < '09:31' && Number(b.close) > 0)
+  if (firstStable) return Number(firstStable.close)
+  const first = sorted.find(b => Number(b.pre_close || b.open || b.close) > 0)
+  return first ? Number(first.pre_close || first.open || first.close) : null
+}
+
 function calcSeries(bars) {
   const map    = toMap(bars)
   const prices = []
   const vols   = []
-  let base = null
+  const base = detectBase(bars)
   for (const t of ALL_TIMES) {
     const b = map[t]
     if (b) {
-      if (base === null) base = b.pre_close || b.open || b.close
       prices.push(base ? +((b.close - base) / base * 100).toFixed(3) : null)
       vols.push(+(b.volume || 0))
     } else {
@@ -231,14 +242,34 @@ function renderChart() {
     },
     axisPointer: { link: [{ xAxisIndex: 'all' }] },
     dataZoom: [
-      { type: 'inside', xAxisIndex: Array.from({length: gridN},(_,i)=>i), start: 0, end: 100 },
+      {
+        type: 'inside',
+        xAxisIndex: Array.from({length: gridN},(_,i)=>i),
+        start: 0,
+        end: 100,
+        zoomOnMouseWheel: false,
+        moveOnMouseWheel: false,
+        moveOnMouseMove: false,
+      },
     ],
     grid: grids, xAxis: xAxes, yAxis: yAxes, series,
   }, true)
 }
 
 watch(() => props.bars, () => nextTick(renderChart), { deep: true })
-watch(() => props.date,  () => { cmpDate.value=''; cmpBars.value=[]; nextTick(renderChart) })
+watch(() => props.date,  () => {
+  cmpDate.value = props.compareDate || ''
+  cmpBars.value = props.compareBars || []
+  nextTick(renderChart)
+})
+watch(() => props.compareDate, v => {
+  cmpDate.value = v || ''
+  nextTick(renderChart)
+})
+watch(() => props.compareBars, v => {
+  cmpBars.value = v || []
+  nextTick(renderChart)
+}, { deep: true })
 
 onMounted(() => {
   chart = echarts.init(chartEl.value, null, { renderer: 'canvas' })

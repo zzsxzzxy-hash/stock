@@ -80,14 +80,14 @@
         </el-col>
       </el-row>
 
-      <!-- 分钟K线图表 -->
-      <el-card shadow="never" class="section-card chart-card">
-        <MinuteBarChart
-          :code="result.code"
-          :date="result.date"
-          :bars="result.minute_bars?.today || []"
-        />
-      </el-card>
+      <!-- 龙头强势同款单股票详情 -->
+      <StockSignalDetail
+        v-if="result.signal_detail"
+        class="signal-detail"
+        :row="result.signal_detail"
+        :date="result.date"
+        active-mode="strict"
+      />
 
       <!-- 预计算数据 -->
       <el-card shadow="never" class="section-card" v-if="!result.pre_calc.available">
@@ -186,7 +186,7 @@ import { ref, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { InfoFilled, WarningFilled } from '@element-plus/icons-vue'
 import axios from 'axios'
-import MinuteBarChart from '@/components/MinuteBarChart.vue'
+import StockSignalDetail from '@/components/StockSignalDetail.vue'
 
 const today = new Date().toISOString().slice(0, 10)
 const form = ref({
@@ -330,6 +330,7 @@ const metrics = computed(() => {
   padding: 8px 10px; text-align: center; }
 .metric-label { font-size: 11px; color: #909399; }
 .metric-value { font-size: 15px; font-weight: 600; margin-top: 2px; }
+.signal-detail { margin-bottom: 12px; }
 
 /* 因子卡片 */
 .factors-row { margin-bottom: 12px; }
@@ -372,5 +373,4 @@ const metrics = computed(() => {
 .cache-hint  { font-size: 11px; color: #e6a23c; display: flex; align-items: center; gap: 4px; margin-top: 4px; }
 .raw-json { font-size: 11px; max-height: 400px; overflow: auto; background: #1e1e1e;
   color: #d4d4d4; padding: 12px; border-radius: 4px; }
-.chart-card :deep(.el-card__body) { padding: 10px 14px; }
 </style>

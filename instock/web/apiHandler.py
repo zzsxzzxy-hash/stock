@@ -11,6 +11,8 @@ Vue3 前端所需 REST API：
 import json
 import datetime
 from abc import ABC
+from collections import defaultdict, deque
+import math
 
 from tornado import gen
 import requests as _req
@@ -24,6 +26,202 @@ __author__ = 'myh'
 __date__ = '2024/6/1'
 
 _ATTENTION_TABLE = tbs.TABLE_CN_STOCK_ATTENTION['name']
+_OPERATION_LOG_TABLE = 'cn_trade_operation_log'
+
+
+def _ensure_operation_log_table(db):
+    db.execute(f'''
+        CREATE TABLE IF NOT EXISTS "{_OPERATION_LOG_TABLE}" (
+            id BIGSERIAL PRIMARY KEY,
+            trade_date DATE NOT NULL,
+            trade_time VARCHAR(5),
+            code VARCHAR(6) NOT NULL,
+            name VARCHAR(30),
+            action VARCHAR(16) NOT NULL,
+            price NUMERIC(12, 4),
+            quantity NUMERIC(18, 2),
+            mainline VARCHAR(80),
+            strategy VARCHAR(40),
+            reason TEXT,
+            result VARCHAR(40),
+            follow_plan TEXT,
+            system_judgment TEXT,
+            signal_strategy VARCHAR(40),
+            signal_snapshot_time VARCHAR(5),
+            signal_core_score NUMERIC(10, 2),
+            signal_mode VARCHAR(40),
+            signal_buy_status VARCHAR(24),
+            signal_amount_ratio NUMERIC(12, 4),
+            signal_risk TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    db.execute(f'''
+        ALTER TABLE "{_OPERATION_LOG_TABLE}"
+            DROP COLUMN IF EXISTS decision,
+            DROP COLUMN IF EXISTS mistake,
+            ADD COLUMN IF NOT EXISTS system_judgment TEXT,
+            ADD COLUMN IF NOT EXISTS signal_strategy VARCHAR(40),
+            ADD COLUMN IF NOT EXISTS signal_snapshot_time VARCHAR(5),
+            ADD COLUMN IF NOT EXISTS signal_core_score NUMERIC(10, 2),
+            ADD COLUMN IF NOT EXISTS signal_mode VARCHAR(40),
+            ADD COLUMN IF NOT EXISTS signal_buy_status VARCHAR(24),
+            ADD COLUMN IF NOT EXISTS signal_amount_ratio NUMERIC(12, 4),
+            ADD COLUMN IF NOT EXISTS signal_risk TEXT
+    ''')
+    db.execute(f'''
+        CREATE INDEX IF NOT EXISTS "idx_{_OPERATION_LOG_TABLE}_date_code"
+        ON "{_OPERATION_LOG_TABLE}" (trade_date DESC, code)
+    ''')
+
+
+def _clean_code(code: str) -> str:
+    code = str(code or '').strip()
+    return code.zfill(6) if code.isdigit() and len(code) <= 6 else code
+
+
+def _num_or_none(value):
+    if value in (None, ''):
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def _system_judgment_text(item):
+    def display(value, digits=None):
+        if value in (None, ''):
+            return '-'
+        if digits is None:
+            return str(value)
+        try:
+            return f'{float(value):.{digits}f}'
+        except Exception:
+            return str(value)
+
+    return '；'.join([
+        f"核心分：{display(item.get('signal_core_score'), 1)}",
+        f"模式：{display(item.get('signal_mode'))}",
+        f"买入状态：{display(item.get('signal_buy_status'))}",
+        f"量比：{display(item.get('signal_amount_ratio'), 2)}",
+        f"风险：{display(item.get('signal_risk') or '无')}",
+    ])
+
+
+def _enrich_operation_signal(item):
+    """未携带系统判断时，按交易日期和时间用当前主线逻辑自动补齐。"""
+    if item.get('system_judgment'):
+        return item
+    if not item.get('trade_date') or not item.get('trade_time') or not item.get('code'):
+        return item
+
+    try:
+        from instock.web.volumeHandler import _stock_signal_detail_for_code
+
+        detail = _stock_signal_detail_for_code(
+            item['code'], item['trade_date'], item['trade_time']
+        )
+        risks = detail.get('risk_tags') or []
+        if not isinstance(risks, list):
+            risks = [str(risks)] if risks else []
+        if not risks:
+            tags = detail.get('tags') or ''
+            risks = [v.strip() for v in str(tags).split(',') if v.strip()][:3]
+        item['signal_strategy'] = item.get('signal_strategy') or 'mainline_core'
+        item['signal_snapshot_time'] = item.get('signal_snapshot_time') or item['trade_time']
+        item['signal_core_score'] = (
+            item.get('signal_core_score')
+            if item.get('signal_core_score') is not None
+            else _num_or_none(detail.get('core_score', detail.get('score')))
+        )
+        item['signal_mode'] = (
+            item.get('signal_mode')
+            or str(detail.get('trade_mode') or detail.get('signal_type') or '').strip()
+        )
+        item['signal_buy_status'] = (
+            item.get('signal_buy_status')
+            or str(detail.get('observe_label') or '').strip()
+        )
+        item['signal_amount_ratio'] = (
+            item.get('signal_amount_ratio')
+            if item.get('signal_amount_ratio') is not None
+            else _num_or_none(detail.get('amt_vs_prev'))
+        )
+        item['signal_risk'] = item.get('signal_risk') or ' / '.join(str(v) for v in risks if v)
+        item['mainline'] = (
+            item.get('mainline')
+            or str(detail.get('mainline_theme') or detail.get('trade_theme') or detail.get('best_sector') or '').strip()
+        )
+        item['name'] = item.get('name') or str(detail.get('name') or '').strip()
+        item['system_judgment'] = _system_judgment_text(item)
+    except Exception:
+        # 操作记录仍可保存；系统判断可以稍后在页面重新识别。
+        pass
+    return item
+
+
+def _operation_pnl_map(rows):
+    """按股票和交易先后分组，组内所有买卖行显示同一组收益。"""
+    lots_by_code = defaultdict(deque)
+    group_seq = defaultdict(int)
+    groups = {}
+
+    for row in rows or []:
+        action = str(row.get('action') or '').lower()
+        code = str(row.get('code') or '').zfill(6)
+        price = _num_or_none(row.get('price'))
+        quantity = _num_or_none(row.get('quantity'))
+        if not code or price is None or quantity is None or price <= 0 or quantity <= 0:
+            continue
+
+        if action == 'buy':
+            if not lots_by_code[code]:
+                group_seq[code] += 1
+                group_key = (code, group_seq[code])
+                groups[group_key] = {
+                    'row_ids': set(),
+                    'buy_cost': 0.0,
+                    'sell_proceeds': 0.0,
+                }
+            else:
+                group_key = lots_by_code[code][0]['group_key']
+            groups[group_key]['row_ids'].add(row['id'])
+            groups[group_key]['buy_cost'] += price * quantity
+            lots_by_code[code].append({
+                'id': row['id'],
+                'price': price,
+                'quantity': quantity,
+                'group_key': group_key,
+            })
+            continue
+
+        if action != 'sell':
+            continue
+
+        remaining = quantity
+        while remaining > 1e-9 and lots_by_code[code]:
+            lot = lots_by_code[code][0]
+            matched = min(remaining, lot['quantity'])
+            group = groups[lot['group_key']]
+            group['row_ids'].add(row['id'])
+            group['sell_proceeds'] += price * matched
+            lot['quantity'] -= matched
+            remaining -= matched
+            if lot['quantity'] <= 1e-9:
+                lots_by_code[code].popleft()
+
+    pnl_map = {}
+    for group in groups.values():
+        if group['buy_cost'] <= 0 or group['sell_proceeds'] <= 0:
+            continue
+        pct = (group['sell_proceeds'] / group['buy_cost'] - 1) * 100
+        # 用户示例按两位小数截取，避免 36.66 -> 46.00 显示为 25.48%。
+        pct = math.trunc(pct * 100) / 100
+        for row_id in group['row_ids']:
+            pnl_map[row_id] = pct
+    return pnl_map
 
 # 有 order_columns 子查询的表，改用 LEFT JOIN 实现 cdatetime
 # 无需在这里枚举，apiHandler 统一检测 wmd.order_columns 是否含子查询关键字
@@ -205,9 +403,10 @@ class ApiKlineHandler(webBase.BaseHandler, ABC):
     _HIST_TABLE = 'cn_stock_hist_data'
 
     def get(self):
-        code   = self.get_argument("code",   default=None,    strip=False)
-        date   = self.get_argument("date",   default=None,    strip=False)
-        period = self.get_argument("period", default="daily", strip=False)
+        code       = self.get_argument("code",       default=None,    strip=False)
+        date       = self.get_argument("date",       default=None,    strip=False)
+        start_date = self.get_argument("start_date", default=None,    strip=False)
+        period     = self.get_argument("period",     default="daily", strip=False)
 
         self.set_header('Content-Type', 'application/json;charset=UTF-8')
         self.set_header('Access-Control-Allow-Origin', '*')
@@ -217,15 +416,24 @@ class ApiKlineHandler(webBase.BaseHandler, ABC):
             self.write(json.dumps({'error': 'code is required'}))
             return
         try:
-            # 日K：直接取最近 500 条
+            conditions = ['code = %s']
+            params = [code]
+            if start_date:
+                conditions.append('date >= %s')
+                params.append(start_date)
+            if date:
+                conditions.append('date <= %s')
+                params.append(date)
+
+            # 默认最多取最近 500 条；前端日K会传 start_date 控制为近 3 个月。
             sql = (
                 'SELECT date, open, close, high, low, volume, amount,'
                 ' quote_change, ups_downs, turnover'
                 ' FROM "' + self._HIST_TABLE + '"'
-                ' WHERE code = %s'
+                ' WHERE ' + ' AND '.join(conditions) +
                 ' ORDER BY date DESC LIMIT 500'
             )
-            rows = list(reversed(self.db.query(sql, code)))
+            rows = list(reversed(self.db.query(sql, *params)))
 
             if not rows:
                 self.write(json.dumps([], ensure_ascii=False))
@@ -370,6 +578,189 @@ class ApiWatchlistHandler(webBase.BaseHandler, ABC):
         except Exception as e:
             self.set_status(500)
             self.write(json.dumps({'error': str(e)}, ensure_ascii=False))
+
+
+class ApiOperationLogHandler(webBase.BaseHandler, ABC):
+    """每日操作记录：供超短主线接力复盘使用"""
+
+    _editable_fields = [
+        'trade_date', 'trade_time', 'code', 'name', 'action', 'price', 'quantity',
+        'mainline', 'strategy', 'reason', 'result', 'follow_plan',
+        'system_judgment', 'signal_strategy', 'signal_snapshot_time',
+        'signal_core_score', 'signal_mode', 'signal_buy_status',
+        'signal_amount_ratio', 'signal_risk'
+    ]
+
+    def _write_headers(self):
+        self.set_header('Content-Type', 'application/json;charset=UTF-8')
+        self.set_header('Access-Control-Allow-Origin', '*')
+
+    def _payload(self):
+        body = json.loads(self.request.body or '{}')
+        return {
+            'trade_date': str(body.get('trade_date') or '').strip(),
+            'trade_time': str(body.get('trade_time') or '').strip()[:5],
+            'code': _clean_code(body.get('code')),
+            'name': str(body.get('name') or '').strip(),
+            'action': str(body.get('action') or '').strip(),
+            'price': _num_or_none(body.get('price')),
+            'quantity': _num_or_none(body.get('quantity')),
+            'mainline': str(body.get('mainline') or '').strip(),
+            'strategy': str(body.get('strategy') or '超短主线接力').strip(),
+            'reason': str(body.get('reason') or '').strip(),
+            'result': str(body.get('result') or '').strip(),
+            'follow_plan': str(body.get('follow_plan') or '').strip(),
+            'system_judgment': str(body.get('system_judgment') or '').strip(),
+            'signal_strategy': str(body.get('signal_strategy') or '').strip(),
+            'signal_snapshot_time': str(body.get('signal_snapshot_time') or '').strip()[:5],
+            'signal_core_score': _num_or_none(body.get('signal_core_score')),
+            'signal_mode': str(body.get('signal_mode') or '').strip(),
+            'signal_buy_status': str(body.get('signal_buy_status') or '').strip(),
+            'signal_amount_ratio': _num_or_none(body.get('signal_amount_ratio')),
+            'signal_risk': str(body.get('signal_risk') or '').strip(),
+        }
+
+    def get(self):
+        self._write_headers()
+        try:
+            _ensure_operation_log_table(self.db)
+            date = self.get_argument('date', default='', strip=True)
+            code = _clean_code(self.get_argument('code', default='', strip=True))
+            page = int(self.get_argument('page', default='1', strip=True))
+            page_size = min(int(self.get_argument('size', default='200', strip=True)), 1000)
+            offset = (max(page, 1) - 1) * page_size
+
+            conditions = []
+            params = []
+            if date:
+                conditions.append('trade_date = %s')
+                params.append(date)
+            if code:
+                conditions.append('code = %s')
+                params.append(code)
+            where_sql = (' WHERE ' + ' AND '.join(conditions)) if conditions else ''
+            total_row = self.db.get(
+                f'SELECT COUNT(*) AS cnt FROM "{_OPERATION_LOG_TABLE}"{where_sql}',
+                *params
+            )
+            rows = self.db.query(
+                f'''
+                SELECT *
+                FROM "{_OPERATION_LOG_TABLE}"
+                {where_sql}
+                ORDER BY trade_date DESC, trade_time DESC NULLS LAST, id DESC
+                LIMIT %s OFFSET %s
+                ''',
+                *(params + [page_size, offset])
+            )
+            all_operation_rows = self.db.query(
+                f'''
+                SELECT id, trade_date, trade_time, code, action, price, quantity
+                FROM "{_OPERATION_LOG_TABLE}"
+                ORDER BY trade_date ASC, trade_time ASC NULLS LAST, id ASC
+                '''
+            )
+            pnl_map = _operation_pnl_map(all_operation_rows)
+            for row in rows or []:
+                row['pnl_pct'] = pnl_map.get(row['id'])
+            self.write(json.dumps({
+                'ok': True,
+                'total': total_row['cnt'] if total_row else 0,
+                'page': page,
+                'size': page_size,
+                'data': rows,
+            }, cls=MyEncoder, ensure_ascii=False))
+        except Exception as e:
+            self.set_status(500)
+            self.write(json.dumps({'ok': False, 'error': str(e)}, ensure_ascii=False))
+
+    def post(self):
+        self._write_headers()
+        try:
+            _ensure_operation_log_table(self.db)
+            item = _enrich_operation_signal(self._payload())
+            if not item['trade_date'] or not item['code'] or not item['action']:
+                self.set_status(400)
+                self.write(json.dumps({'ok': False, 'error': 'trade_date, code and action required'}, ensure_ascii=False))
+                return
+            insert_fields = [
+                'trade_date', 'trade_time', 'code', 'name', 'action', 'price', 'quantity',
+                'mainline', 'strategy', 'reason', 'result', 'follow_plan',
+                'system_judgment', 'signal_strategy', 'signal_snapshot_time',
+                'signal_core_score', 'signal_mode', 'signal_buy_status',
+                'signal_amount_ratio', 'signal_risk'
+            ]
+            insert_columns = ', '.join(insert_fields)
+            insert_placeholders = ','.join(['%s'] * len(insert_fields))
+            row = self.db.get(
+                f'''
+                INSERT INTO "{_OPERATION_LOG_TABLE}"
+                ({insert_columns})
+                VALUES ({insert_placeholders})
+                RETURNING *
+                ''',
+                *[item[field] for field in insert_fields]
+            )
+            self.write(json.dumps({'ok': True, 'data': row}, cls=MyEncoder, ensure_ascii=False))
+        except Exception as e:
+            self.set_status(500)
+            self.write(json.dumps({'ok': False, 'error': str(e)}, ensure_ascii=False))
+
+    def put(self):
+        self._write_headers()
+        try:
+            _ensure_operation_log_table(self.db)
+            body = json.loads(self.request.body or '{}')
+            item_id = int(body.get('id') or 0)
+            if not item_id:
+                self.set_status(400)
+                self.write(json.dumps({'ok': False, 'error': 'id required'}, ensure_ascii=False))
+                return
+            item = _enrich_operation_signal(self._payload())
+            if not item['trade_date'] or not item['code'] or not item['action']:
+                self.set_status(400)
+                self.write(json.dumps({'ok': False, 'error': 'trade_date, code and action required'}, ensure_ascii=False))
+                return
+            row = self.db.get(
+                f'''
+                UPDATE "{_OPERATION_LOG_TABLE}"
+                SET trade_date=%s, trade_time=%s, code=%s, name=%s, action=%s,
+                    price=%s, quantity=%s, mainline=%s, strategy=%s,
+                    reason=%s, result=%s, follow_plan=%s,
+                    system_judgment=%s, signal_strategy=%s, signal_snapshot_time=%s,
+                    signal_core_score=%s, signal_mode=%s, signal_buy_status=%s,
+                    signal_amount_ratio=%s, signal_risk=%s,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE id=%s
+                RETURNING *
+                ''',
+                item['trade_date'], item['trade_time'], item['code'], item['name'], item['action'],
+                item['price'], item['quantity'], item['mainline'], item['strategy'],
+                item['reason'], item['result'], item['follow_plan'],
+                item['system_judgment'], item['signal_strategy'], item['signal_snapshot_time'],
+                item['signal_core_score'], item['signal_mode'], item['signal_buy_status'],
+                item['signal_amount_ratio'], item['signal_risk'],
+                item_id
+            )
+            self.write(json.dumps({'ok': True, 'data': row}, cls=MyEncoder, ensure_ascii=False))
+        except Exception as e:
+            self.set_status(500)
+            self.write(json.dumps({'ok': False, 'error': str(e)}, ensure_ascii=False))
+
+    def delete(self):
+        self._write_headers()
+        try:
+            _ensure_operation_log_table(self.db)
+            item_id = int(self.get_argument('id', default='0', strip=True))
+            if not item_id:
+                self.set_status(400)
+                self.write(json.dumps({'ok': False, 'error': 'id required'}, ensure_ascii=False))
+                return
+            self.db.execute(f'DELETE FROM "{_OPERATION_LOG_TABLE}" WHERE id=%s', item_id)
+            self.write(json.dumps({'ok': True}))
+        except Exception as e:
+            self.set_status(500)
+            self.write(json.dumps({'ok': False, 'error': str(e)}, ensure_ascii=False))
 
 
 class ApiCustomStrategyHandler(webBase.BaseHandler, ABC):
@@ -601,4 +992,3 @@ class ApiMinuteKlineHandler(webBase.BaseHandler, ABC):
             return result
         except Exception:
             return []
-

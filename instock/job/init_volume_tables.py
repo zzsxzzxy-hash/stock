@@ -43,11 +43,24 @@ def init_tables():
     );
     CREATE INDEX IF NOT EXISTS idx_sector_map_sector
         ON cn_stock_sector_map (sector);
+
+    CREATE TABLE IF NOT EXISTS cn_stock_trade_theme (
+        code             VARCHAR(6)   PRIMARY KEY,
+        name             VARCHAR(80),
+        trade_theme  VARCHAR(80)  NOT NULL,
+        confidence       NUMERIC(8,2) DEFAULT 0,
+        source           VARCHAR(30)  DEFAULT 'algorithm',
+        reason           TEXT,
+        candidate_count  INTEGER      DEFAULT 0,
+        updated_at       TIMESTAMP    DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_trade_theme_name
+        ON cn_stock_trade_theme (trade_theme);
     """
     with mdb.get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql)
-    log.info("表初始化完成：cn_stock_minute_bar, cn_stock_sector_map")
+    log.info("表初始化完成：cn_stock_minute_bar, cn_stock_sector_map, cn_stock_trade_theme")
 
 
 if __name__ == '__main__':

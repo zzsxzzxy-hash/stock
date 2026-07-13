@@ -1,0 +1,397 @@
+[
+  {
+    "exp_name": "fixed_base_medium",
+    "description": "特征集: base, 模型: medium, 时间序列分割",
+    "feature_count": 15,
+    "features": [
+      "snapshot_volume_ratio",
+      "snapshot_vs_daily_volume",
+      "prev_1d_change_rate",
+      "prev_3d_return",
+      "prev_5d_return",
+      "prev_1d_volume_ratio",
+      "prev_3d_turnover",
+      "prev_5d_turnover",
+      "volume_change_ratio",
+      "shrink_volume_rise",
+      "has_theme",
+      "theme_confidence",
+      "market_创业板",
+      "market_北交所",
+      "market_科创板"
+    ],
+    "model_params": {
+      "max_depth": 6,
+      "learning_rate": 0.05,
+      "min_child_weight": 3
+    },
+    "best_iteration": 46,
+    "val_metrics": {
+      "accuracy": 0.6354642313546424,
+      "precision": 0.6404867256637168,
+      "recall": 0.5502058916693063,
+      "f1": 0.5919236667234623,
+      "auc": 0.6969961320078877,
+      "confusion_matrix": {
+        "tn": 2438,
+        "fp": 975,
+        "fn": 1420,
+        "tp": 1737
+      }
+    },
+    "test_metrics": {
+      "accuracy": 0.5898931000971818,
+      "precision": 0.5295862864677765,
+      "recall": 0.6424715056988602,
+      "f1": 0.580592699674738,
+      "auc": 0.637682181828908,
+      "confusion_matrix": {
+        "tn": 3464,
+        "fp": 2854,
+        "fn": 1788,
+        "tp": 3213
+      }
+    },
+    "elapsed_seconds": 0.156558,
+    "timestamp": "2026-07-13T17:12:34.540763"
+  },
+  {
+    "exp_name": "fixed_base+early_medium",
+    "description": "特征集: base+early, 模型: medium, 时间序列分割",
+    "feature_count": 25,
+    "features": [
+      "snapshot_volume_ratio",
+      "snapshot_vs_daily_volume",
+      "prev_1d_change_rate",
+      "prev_3d_return",
+      "prev_5d_return",
+      "prev_1d_volume_ratio",
+      "prev_3d_turnover",
+      "prev_5d_turnover",
+      "volume_change_ratio",
+      "shrink_volume_rise",
+      "has_theme",
+      "theme_confidence",
+      "max_change_0935_0955",
+      "min_change_0935_0955",
+      "final_change_0955",
+      "open_change_0935",
+      "pullback_ratio",
+      "pullback_abs",
+      "max_slope",
+      "avg_slope",
+      "slope_std",
+      "red_minutes_ratio",
+      "market_创业板",
+      "market_北交所",
+      "market_科创板"
+    ],
+    "model_params": {
+      "max_depth": 6,
+      "learning_rate": 0.05,
+      "min_child_weight": 3
+    },
+    "best_iteration": 91,
+    "val_metrics": {
+      "accuracy": 0.6464231354642314,
+      "precision": 0.6828947368421052,
+      "recall": 0.4931897370921761,
+      "f1": 0.5727423211329777,
+      "auc": 0.7237862257085743,
+      "confusion_matrix": {
+        "tn": 2690,
+        "fp": 723,
+        "fn": 1600,
+        "tp": 1557
+      }
+    },
+    "test_metrics": {
+      "accuracy": 0.6067673822775863,
+      "precision": 0.5474628926475664,
+      "recall": 0.6342731453709258,
+      "f1": 0.5876794812413154,
+      "auc": 0.6673252244138068,
+      "confusion_matrix": {
+        "tn": 3696,
+        "fp": 2622,
+        "fn": 1829,
+        "tp": 3172
+      }
+    },
+    "elapsed_seconds": 0.248595,
+    "timestamp": "2026-07-13T17:12:34.789677"
+  },
+  {
+    "exp_name": "fixed_base+market_medium",
+    "description": "特征集: base+market, 模型: medium, 时间序列分割",
+    "feature_count": 19,
+    "features": [
+      "snapshot_volume_ratio",
+      "snapshot_vs_daily_volume",
+      "prev_1d_change_rate",
+      "prev_3d_return",
+      "prev_5d_return",
+      "prev_1d_volume_ratio",
+      "prev_3d_turnover",
+      "prev_5d_turnover",
+      "volume_change_ratio",
+      "shrink_volume_rise",
+      "has_theme",
+      "theme_confidence",
+      "red_ratio",
+      "limit_up_ratio",
+      "limit_down_ratio",
+      "total_amount_billions",
+      "market_创业板",
+      "market_北交所",
+      "market_科创板"
+    ],
+    "model_params": {
+      "max_depth": 6,
+      "learning_rate": 0.05,
+      "min_child_weight": 3
+    },
+    "best_iteration": 43,
+    "val_metrics": {
+      "accuracy": 0.678234398782344,
+      "precision": 0.6861835058907533,
+      "recall": 0.6088058283180234,
+      "f1": 0.6451829472977509,
+      "auc": 0.7402357027820643,
+      "confusion_matrix": {
+        "tn": 2534,
+        "fp": 879,
+        "fn": 1235,
+        "tp": 1922
+      }
+    },
+    "test_metrics": {
+      "accuracy": 0.6112730806608357,
+      "precision": 0.759723422644771,
+      "recall": 0.1757648470305939,
+      "f1": 0.2854822994478727,
+      "auc": 0.6878113930870047,
+      "confusion_matrix": {
+        "tn": 6040,
+        "fp": 278,
+        "fn": 4122,
+        "tp": 879
+      }
+    },
+    "elapsed_seconds": 0.141599,
+    "timestamp": "2026-07-13T17:12:34.931785"
+  },
+  {
+    "exp_name": "fixed_all_medium",
+    "description": "特征集: all, 模型: medium, 时间序列分割",
+    "feature_count": 30,
+    "features": [
+      "snapshot_volume_ratio",
+      "snapshot_vs_daily_volume",
+      "prev_1d_change_rate",
+      "prev_3d_return",
+      "prev_5d_return",
+      "prev_1d_volume_ratio",
+      "prev_3d_turnover",
+      "prev_5d_turnover",
+      "volume_change_ratio",
+      "shrink_volume_rise",
+      "has_theme",
+      "theme_confidence",
+      "max_change_0935_0955",
+      "min_change_0935_0955",
+      "final_change_0955",
+      "open_change_0935",
+      "pullback_ratio",
+      "pullback_abs",
+      "max_slope",
+      "avg_slope",
+      "slope_std",
+      "red_minutes_ratio",
+      "red_ratio",
+      "limit_up_ratio",
+      "limit_down_ratio",
+      "total_amount_billions",
+      "theme_stock_count",
+      "market_创业板",
+      "market_北交所",
+      "market_科创板"
+    ],
+    "model_params": {
+      "max_depth": 6,
+      "learning_rate": 0.05,
+      "min_child_weight": 3
+    },
+    "best_iteration": 119,
+    "val_metrics": {
+      "accuracy": 0.7199391171993912,
+      "precision": 0.7411204686927865,
+      "recall": 0.6411149825783972,
+      "f1": 0.6875,
+      "auc": 0.7825285774518622,
+      "confusion_matrix": {
+        "tn": 2706,
+        "fp": 707,
+        "fn": 1133,
+        "tp": 2024
+      }
+    },
+    "test_metrics": {
+      "accuracy": 0.6396324763671702,
+      "precision": 0.8140326975476839,
+      "recall": 0.23895220955808838,
+      "f1": 0.36945432060596695,
+      "auc": 0.7088285571755544,
+      "confusion_matrix": {
+        "tn": 6045,
+        "fp": 273,
+        "fn": 3806,
+        "tp": 1195
+      }
+    },
+    "elapsed_seconds": 0.308942,
+    "timestamp": "2026-07-13T17:12:35.240953"
+  },
+  {
+    "exp_name": "fixed_all_shallow",
+    "description": "特征集: all, 模型: shallow, 时间序列分割",
+    "feature_count": 30,
+    "features": [
+      "snapshot_volume_ratio",
+      "snapshot_vs_daily_volume",
+      "prev_1d_change_rate",
+      "prev_3d_return",
+      "prev_5d_return",
+      "prev_1d_volume_ratio",
+      "prev_3d_turnover",
+      "prev_5d_turnover",
+      "volume_change_ratio",
+      "shrink_volume_rise",
+      "has_theme",
+      "theme_confidence",
+      "max_change_0935_0955",
+      "min_change_0935_0955",
+      "final_change_0955",
+      "open_change_0935",
+      "pullback_ratio",
+      "pullback_abs",
+      "max_slope",
+      "avg_slope",
+      "slope_std",
+      "red_minutes_ratio",
+      "red_ratio",
+      "limit_up_ratio",
+      "limit_down_ratio",
+      "total_amount_billions",
+      "theme_stock_count",
+      "market_创业板",
+      "market_北交所",
+      "market_科创板"
+    ],
+    "model_params": {
+      "max_depth": 3,
+      "learning_rate": 0.05,
+      "min_child_weight": 5
+    },
+    "best_iteration": 294,
+    "val_metrics": {
+      "accuracy": 0.7178082191780822,
+      "precision": 0.737860533041256,
+      "recall": 0.640164713335445,
+      "f1": 0.6855495251017639,
+      "auc": 0.7857643560587113,
+      "confusion_matrix": {
+        "tn": 2695,
+        "fp": 718,
+        "fn": 1136,
+        "tp": 2021
+      }
+    },
+    "test_metrics": {
+      "accuracy": 0.6440498277232971,
+      "precision": 0.8283783783783784,
+      "recall": 0.2451509698060388,
+      "f1": 0.3783366764388212,
+      "auc": 0.7303941079463753,
+      "confusion_matrix": {
+        "tn": 6064,
+        "fp": 254,
+        "fn": 3775,
+        "tp": 1226
+      }
+    },
+    "elapsed_seconds": 0.377736,
+    "timestamp": "2026-07-13T17:12:35.619248"
+  },
+  {
+    "exp_name": "fixed_all_deep",
+    "description": "特征集: all, 模型: deep, 时间序列分割",
+    "feature_count": 30,
+    "features": [
+      "snapshot_volume_ratio",
+      "snapshot_vs_daily_volume",
+      "prev_1d_change_rate",
+      "prev_3d_return",
+      "prev_5d_return",
+      "prev_1d_volume_ratio",
+      "prev_3d_turnover",
+      "prev_5d_turnover",
+      "volume_change_ratio",
+      "shrink_volume_rise",
+      "has_theme",
+      "theme_confidence",
+      "max_change_0935_0955",
+      "min_change_0935_0955",
+      "final_change_0955",
+      "open_change_0935",
+      "pullback_ratio",
+      "pullback_abs",
+      "max_slope",
+      "avg_slope",
+      "slope_std",
+      "red_minutes_ratio",
+      "red_ratio",
+      "limit_up_ratio",
+      "limit_down_ratio",
+      "total_amount_billions",
+      "theme_stock_count",
+      "market_创业板",
+      "market_北交所",
+      "market_科创板"
+    ],
+    "model_params": {
+      "max_depth": 10,
+      "learning_rate": 0.03,
+      "min_child_weight": 1
+    },
+    "best_iteration": 102,
+    "val_metrics": {
+      "accuracy": 0.7216133942161339,
+      "precision": 0.7339675828047921,
+      "recall": 0.6598036110231232,
+      "f1": 0.6949124270225188,
+      "auc": 0.7801456652585407,
+      "confusion_matrix": {
+        "tn": 2658,
+        "fp": 755,
+        "fn": 1074,
+        "tp": 2083
+      }
+    },
+    "test_metrics": {
+      "accuracy": 0.6487322201607916,
+      "precision": 0.7597567156614293,
+      "recall": 0.2997400519896021,
+      "f1": 0.429882420418698,
+      "auc": 0.703930850423774,
+      "confusion_matrix": {
+        "tn": 5844,
+        "fp": 474,
+        "fn": 3502,
+        "tp": 1499
+      }
+    },
+    "elapsed_seconds": 0.715799,
+    "timestamp": "2026-07-13T17:12:36.335778"
+  }
+]

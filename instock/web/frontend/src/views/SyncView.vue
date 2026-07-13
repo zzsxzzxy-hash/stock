@@ -93,7 +93,11 @@
     </el-card>
       </el-tab-pane>
 
-      <!-- 板块维护 tab -->
+      <!-- 交易主线 tab -->
+      <el-tab-pane label="交易主线" name="trade_themes">
+        <TradeThemeManager />
+      </el-tab-pane>
+
       <el-tab-pane label="板块维护" name="sectors">
         <SectorManager />
       </el-tab-pane>
@@ -111,6 +115,7 @@ import { ref, computed, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { triggerSync } from '@/api'
 import { FolderOpened } from '@element-plus/icons-vue'
+import TradeThemeManager from '@/components/TradeThemeManager.vue'
 import SectorManager from '@/components/SectorManager.vue'
 import RedisQuery from '@/components/RedisQuery.vue'
 
