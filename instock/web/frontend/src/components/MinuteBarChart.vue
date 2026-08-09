@@ -6,9 +6,10 @@
         <el-radio-button value="price">分时图</el-radio-button>
         <el-radio-button value="vol">量柱图</el-radio-button>
         <el-radio-button value="both">分时+量柱</el-radio-button>
+        <el-radio-button value="daily">日K</el-radio-button>
       </el-radio-group>
 
-      <div class="compare-area">
+      <div v-if="chartType !== 'daily'" class="compare-area">
         <span class="cmp-label">叠加对比：</span>
         <el-date-picker
           v-model="cmpDate"
@@ -50,6 +51,8 @@ const props = defineProps({
   bars: { type: Array,  default: () => [] },
   compareDate: { type: String, default: '' },
   compareBars: { type: Array, default: () => [] },
+  dailyBars: { type: Array, default: () => [] },
+  focusTime: { type: String, default: '' },
 })
 
 const chartType = ref('both')
@@ -58,6 +61,7 @@ const cmpBars   = ref(props.compareBars || [])
 const loading   = ref(false)
 const chartEl   = ref(null)
 let chart = null
+let resizeObserver = null
 
 // ── 交易时间轴 ────────────────────────────────────────────────────────────
 function tradingTimes() {
@@ -108,6 +112,54 @@ function calcSeries(bars) {
   return { prices, vols }
 }
 
+function renderDailyChart() {
+  const bars = [...(props.dailyBars || [])]
+    .filter(bar => bar?.date)
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)))
+    .slice(-100)
+  if (!bars.length) {
+    chart.clear()
+    return
+  }
+  const dates = bars.map(bar => String(bar.date).slice(5))
+  const candles = bars.map(bar => [Number(bar.open), Number(bar.close), Number(bar.low), Number(bar.high)])
+  const volumes = bars.map(bar => ({
+    value: Number(bar.volume) || 0,
+    itemStyle: { color: Number(bar.close) >= Number(bar.open) ? '#d84a4a' : '#1b9a74' },
+  }))
+  chart.setOption({
+    animation: false,
+    backgroundColor: '#fff',
+    tooltip: {
+      trigger: 'axis', axisPointer: { type: 'cross' },
+      formatter(params) {
+        const bar = bars[params?.[0]?.dataIndex]
+        if (!bar) return ''
+        return [
+          `<b>${bar.date}</b>`,
+          `开 ${Number(bar.open).toFixed(2)}　收 ${Number(bar.close).toFixed(2)}`,
+          `高 ${Number(bar.high).toFixed(2)}　低 ${Number(bar.low).toFixed(2)}`,
+          `涨跌 ${Number(bar.pct_chg).toFixed(2)}%`,
+        ].join('<br/>')
+      },
+    },
+    grid: [{ top: 24, left: 54, right: 18, height: '56%' }, { top: '71%', left: 54, right: 18, bottom: 30 }],
+    xAxis: [
+      { type: 'category', data: dates, boundaryGap: true, axisLabel: { show: false }, axisTick: { show: false } },
+      { type: 'category', gridIndex: 1, data: dates, boundaryGap: true, axisLabel: { fontSize: 10 }, axisTick: { show: false } },
+    ],
+    yAxis: [
+      { scale: true, splitLine: { lineStyle: { color: '#f0f0f0' } }, axisLabel: { fontSize: 10, formatter: value => Number(value).toFixed(2) } },
+      { gridIndex: 1, scale: true, splitLine: { show: false }, axisLabel: { fontSize: 10, formatter: value => value >= 10000 ? `${(value / 10000).toFixed(0)}万` : value } },
+    ],
+    dataZoom: [{ type: 'inside', xAxisIndex: [0, 1], zoomOnMouseWheel: false }],
+    series: [
+      { type: 'candlestick', data: candles, itemStyle: { color: '#d84a4a', color0: '#1b9a74', borderColor: '#d84a4a', borderColor0: '#1b9a74' } },
+      { type: 'bar', xAxisIndex: 1, yAxisIndex: 1, data: volumes, barMaxWidth: 12 },
+    ],
+  }, true)
+}
+
 // ── 加载对比日 ─────────────────────────────────────────────────────────────
 async function loadCmpBars() {
   if (!cmpDate.value || !props.code) return
@@ -129,6 +181,10 @@ function clearCmp() {
 // ── ECharts 渲染 ───────────────────────────────────────────────────────────
 function renderChart() {
   if (!chart) return
+  if (chartType.value === 'daily') {
+    renderDailyChart()
+    return
+  }
   const main   = calcSeries(props.bars)
   const hasCmp = cmpBars.value.length > 0
   const cmp    = hasCmp ? calcSeries(cmpBars.value) : null
@@ -183,7 +239,13 @@ function renderChart() {
       connectNulls: false,
       markLine: {
         silent: true, symbol: 'none',
-        data: [{ yAxis: 0, lineStyle: { color: '#aaa', type: 'dashed', width: 1 } }],
+        data: (() => {
+          const lines = [{ yAxis: 0, lineStyle: { color: '#aaa', type: 'dashed', width: 1 } }]
+          if (props.focusTime) {
+            lines.push({ xAxis: props.focusTime, label: { show: true, formatter: props.focusTime, position: 'start', fontSize: 10, color: '#d03050' }, lineStyle: { color: '#d03050', type: 'dashed', width: 1.5 } })
+          }
+          return lines
+        })(),
       },
     })
     if (cmp) {
@@ -254,6 +316,13 @@ function renderChart() {
     ],
     grid: grids, xAxis: xAxes, yAxis: yAxes, series,
   }, true)
+
+  if (props.focusTime && ALL_TIMES.includes(props.focusTime)) {
+    setTimeout(() => {
+      const idx = ALL_TIMES.indexOf(props.focusTime)
+      chart.dispatchAction({ type: 'showTip', seriesIndex: 0, dataIndex: idx })
+    }, 200)
+  }
 }
 
 watch(() => props.bars, () => nextTick(renderChart), { deep: true })
@@ -270,12 +339,19 @@ watch(() => props.compareBars, v => {
   cmpBars.value = v || []
   nextTick(renderChart)
 }, { deep: true })
+watch(() => props.dailyBars, () => nextTick(renderChart), { deep: true })
 
 onMounted(() => {
   chart = echarts.init(chartEl.value, null, { renderer: 'canvas' })
   const resizeFn = () => chart?.resize()
   window.addEventListener('resize', resizeFn)
-  onUnmounted(() => { chart?.dispose(); window.removeEventListener('resize', resizeFn) })
+  resizeObserver = new ResizeObserver(() => chart?.resize())
+  resizeObserver.observe(chartEl.value)
+  onUnmounted(() => {
+    resizeObserver?.disconnect()
+    chart?.dispose()
+    window.removeEventListener('resize', resizeFn)
+  })
   nextTick(renderChart)
 })
 </script>

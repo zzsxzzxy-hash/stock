@@ -24,8 +24,8 @@
             @input="onSearch"
           />
         </el-col>
-        <!-- 板块筛选（只对有 code 字段的表显示） -->
-        <el-col :span="10" v-if="hasCode">
+        <!-- 市场筛选（ETF 独立表不需要 A 股市场筛选） -->
+        <el-col :span="10" v-if="showMarketFilter">
           <el-radio-group v-model="marketFilter" size="small" @change="onMarketChange">
             <el-radio-button value="">全部</el-radio-button>
             <el-radio-button value="sh">沪市</el-radio-button>
@@ -36,7 +36,7 @@
             <el-radio-button value="etf">ETF</el-radio-button>
           </el-radio-group>
         </el-col>
-        <el-col :span="hasCode ? 5 : 15" style="text-align:right">
+        <el-col :span="showMarketFilter ? 5 : 15" style="text-align:right">
           <el-text type="info" size="small" style="margin-right:12px">
             共 {{ total }} 条
             <template v-if="attentionCount"> | 关注 {{ attentionCount }} 只</template>
@@ -144,6 +144,7 @@ const total       = ref(0)
 let searchTimer = null
 
 const tableName = computed(() => route.params.table)
+const showMarketFilter = computed(() => hasCode.value && tableName.value !== 'cn_etf_spot')
 
 const FIXED_COLS = new Set(['date', 'code', 'name', 'cdatetime'])
 const dynamicColumns = computed(() =>
@@ -181,7 +182,7 @@ async function loadPage(page = currentPage.value) {
       size: pageSize.value,
     })
     if (searchText.value)  params.set('search', searchText.value)
-    if (marketFilter.value) params.set('market', marketFilter.value)
+    if (showMarketFilter.value && marketFilter.value) params.set('market', marketFilter.value)
 
     const res = await axios.get(`/api/data?${params}`)
     tableData.value = res.data.data  || []

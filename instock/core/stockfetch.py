@@ -69,7 +69,7 @@ def fetch_stocks_trade_date():
 # 读取当天ETF数据
 def fetch_etfs(date):
     try:
-        data = fee.fund_etf_spot_em()
+        data = fee.fund_etf_spot_em(date)
         if data is None or len(data.index) == 0:
             return None
         if date is None:

@@ -17,10 +17,13 @@
 """
 import json
 import datetime
+import hashlib
 import logging
+import uuid
 from abc import ABC
 from decimal import Decimal
 
+import psycopg2.extras
 from tornado import gen
 import instock.web.base as webBase
 import instock.lib.database as mdb
@@ -40,6 +43,11 @@ from instock.job.morning_signal_replay import (
 )
 
 log = logging.getLogger(__name__)
+_MAINLINE_RECOMMEND_TABLE_READY = False
+_INTRADAY_BURST_STRATEGY_ID = 'intraday_burst_capture_v2'
+_INTRADAY_BURST_VERSION = 'v2.0'
+_INTRADAY_BURST_V3_STRATEGY_ID = 'intraday_burst_capture_v3'
+_INTRADAY_BURST_V3_VERSION = 'v3.0'
 
 
 def _today() -> str:
@@ -96,6 +104,14 @@ def _json_number(v):
     if isinstance(v, (datetime.date, datetime.datetime)):
         return v.isoformat()
     return v
+
+
+def _json_safe(v):
+    if isinstance(v, dict):
+        return {str(k): _json_safe(value) for k, value in v.items()}
+    if isinstance(v, (list, tuple, set)):
+        return [_json_safe(value) for value in v]
+    return _json_number(v)
 
 
 def _float_or_default(v, default: float = 0.0) -> float:
@@ -304,11 +320,14 @@ def _mainline_cache_key(date: str, snapshot: str, max_sector_rank: int,
                         min_sector_strong: int, min_ret: float,
                         max_ret: float, min_amt_ratio: float,
                         min_amount: float, theme: str, limit: int,
-                        include_bars: bool, market: str = 'all') -> str:
+                        include_bars: bool, market: str = 'all',
+                        high_prob_only: bool = False,
+                        strict_overnight: bool = False) -> str:
     return (
-        f'mainline_core:v18:{date}:{snapshot}:{max_sector_rank}:'
+        f'mainline_core:v23:{date}:{snapshot}:{max_sector_rank}:'
         f'{min_sector_strong}:{min_ret}:{max_ret}:{min_amt_ratio}:'
-        f'{min_amount}:{theme}:{limit}:{int(include_bars)}:{market}'
+        f'{min_amount}:{theme}:{limit}:{int(include_bars)}:{market}:'
+        f'{int(high_prob_only)}:{int(strict_overnight)}'
     )
 
 
@@ -632,6 +651,8 @@ def _mainline_mode_group(mode: str) -> str:
 
 MAINLINE_REVIEW_CORE_MODES = ('主线核心追强', '核心中位承接')
 MAINLINE_GUARD_CUTOFF = '09:45'
+MAINLINE_RECOMMEND_START = '09:35'
+MAINLINE_RECOMMEND_END = '09:50'
 MAINLINE_LATE_RUSH_MODE = '09:45后急拉观察'
 MAINLINE_REVIEW_WATCH_MODES = ('主线低位突破', '修复反包观察', MAINLINE_LATE_RUSH_MODE)
 
@@ -660,6 +681,1968 @@ def _minute_gap(later: str, earlier: str) -> int | None:
     if later_min is None or earlier_min is None:
         return None
     return later_min - earlier_min
+
+
+def _ensure_mainline_recommend_tables() -> None:
+    """候选池分钟快照留痕表。只建表/补索引，不做破坏性迁移。"""
+    global _MAINLINE_RECOMMEND_TABLE_READY
+    if _MAINLINE_RECOMMEND_TABLE_READY:
+        return
+    try:
+        mdb.executeSql(
+            '''
+            CREATE TABLE IF NOT EXISTS cn_mainline_recommend_snapshot_meta (
+                trade_date DATE NOT NULL,
+                snapshot_time VARCHAR(5) NOT NULL,
+                param_key VARCHAR(40) NOT NULL,
+                param_text TEXT,
+                candidate_count INTEGER DEFAULT 0,
+                snapshot_confirmed BOOLEAN DEFAULT FALSE,
+                batch_id VARCHAR(36) NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (trade_date, snapshot_time, param_key)
+            )
+            '''
+        )
+        mdb.executeSql(
+            '''
+            CREATE TABLE IF NOT EXISTS cn_mainline_recommend_snapshot (
+                trade_date DATE NOT NULL,
+                snapshot_time VARCHAR(5) NOT NULL,
+                param_key VARCHAR(40) NOT NULL,
+                code VARCHAR(6) NOT NULL,
+                batch_id VARCHAR(36) NOT NULL,
+                page_rank INTEGER,
+                core_score NUMERIC,
+                trade_mode VARCHAR(50),
+                mainline_theme VARCHAR(120),
+                risk_tags TEXT,
+                recommend_count INTEGER DEFAULT 0,
+                max_consecutive_count INTEGER DEFAULT 0,
+                recommend_snapshots TEXT,
+                payload_json JSONB,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (trade_date, snapshot_time, param_key, code)
+            )
+            '''
+        )
+        for sql in (
+            'ALTER TABLE cn_mainline_recommend_snapshot_meta ADD COLUMN IF NOT EXISTS snapshot_confirmed BOOLEAN DEFAULT FALSE',
+            'ALTER TABLE cn_mainline_recommend_snapshot ADD COLUMN IF NOT EXISTS recommend_count INTEGER DEFAULT 0',
+            'ALTER TABLE cn_mainline_recommend_snapshot ADD COLUMN IF NOT EXISTS max_consecutive_count INTEGER DEFAULT 0',
+            'ALTER TABLE cn_mainline_recommend_snapshot ADD COLUMN IF NOT EXISTS recommend_snapshots TEXT',
+            'ALTER TABLE cn_mainline_recommend_snapshot ADD COLUMN IF NOT EXISTS payload_json JSONB',
+        ):
+            mdb.executeSql(sql)
+        mdb.executeSql(
+            '''
+            CREATE INDEX IF NOT EXISTS idx_mainline_recommend_snapshot_code
+            ON cn_mainline_recommend_snapshot (trade_date, code, snapshot_time)
+            '''
+        )
+        mdb.executeSql(
+            '''
+            CREATE TABLE IF NOT EXISTS cn_mainline_market_env_snapshot (
+                trade_date DATE NOT NULL,
+                snapshot_time VARCHAR(5) NOT NULL,
+                market_key VARCHAR(40) NOT NULL,
+                market_env JSONB NOT NULL,
+                status VARCHAR(30),
+                action VARCHAR(80),
+                trade_allowed VARCHAR(20),
+                raw_count INTEGER DEFAULT 0,
+                candidate_count INTEGER DEFAULT 0,
+                source VARCHAR(20) DEFAULT 'live',
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (trade_date, snapshot_time, market_key)
+            )
+            '''
+        )
+        mdb.executeSql(
+            '''
+            CREATE INDEX IF NOT EXISTS idx_mainline_market_env_snapshot_date
+            ON cn_mainline_market_env_snapshot (trade_date, snapshot_time, market_key)
+            '''
+        )
+        mdb.executeSql(
+            '''
+            CREATE TABLE IF NOT EXISTS cn_intraday_burst_signal (
+                strategy_id VARCHAR(80) NOT NULL,
+                version VARCHAR(20) NOT NULL,
+                trade_date DATE NOT NULL,
+                snapshot_time VARCHAR(5) NOT NULL,
+                code VARCHAR(6) NOT NULL,
+                page_rank INTEGER NOT NULL,
+                burst_score NUMERIC,
+                limitup_gene_score INTEGER DEFAULT 0,
+                market_status VARCHAR(30),
+                factor_json JSONB NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (strategy_id, version, trade_date, snapshot_time, code)
+            )
+            '''
+        )
+        mdb.executeSql(
+            '''
+            CREATE INDEX IF NOT EXISTS idx_intraday_burst_signal_date
+            ON cn_intraday_burst_signal (trade_date, snapshot_time, page_rank)
+            '''
+        )
+        _MAINLINE_RECOMMEND_TABLE_READY = True
+    except Exception as e:
+        log.warning("初始化主线推荐快照表失败: %s", e)
+
+
+def _mainline_recommend_param_key(max_sector_rank: int, min_sector_strong: int,
+                                  min_ret: float, max_ret: float,
+                                  min_amt_ratio: float, theme: str,
+                                  min_amount: float, markets: list[str],
+                                  limit: int) -> tuple[str, str]:
+    market_key = ','.join(sorted(markets)) if markets else 'all'
+    param_text = (
+        f'max_rank={max_sector_rank}|min_strong={min_sector_strong}|'
+        f'ret={min_ret}:{max_ret}|amt={min_amt_ratio}|'
+        f'min_amount={min_amount}|theme={theme}|market={market_key}|limit={limit}'
+    )
+    return hashlib.sha1(param_text.encode('utf-8')).hexdigest()[:40], param_text
+
+
+def _mainline_market_env_key(markets: list[str]) -> str:
+    return ','.join(sorted(markets)) if markets else 'all'
+
+
+def _save_mainline_market_env_snapshot(date: str, snapshot: str,
+                                       markets: list[str], market_env: dict,
+                                       raw_count: int = 0,
+                                       candidate_count: int = 0,
+                                       source: str = 'live') -> None:
+    """保存市场环境，即使候选池被风控关闭也必须留痕。"""
+    try:
+        _ensure_mainline_recommend_tables()
+        trade_allowed = market_env.get('trade_allowed')
+        if trade_allowed is True:
+            trade_allowed_text = 'true'
+        elif trade_allowed is False:
+            trade_allowed_text = 'false'
+        else:
+            trade_allowed_text = str(trade_allowed or '')
+        mdb.executeSql(
+            '''
+            INSERT INTO cn_mainline_market_env_snapshot
+                (trade_date, snapshot_time, market_key, market_env, status,
+                 action, trade_allowed, raw_count, candidate_count, source, updated_at)
+            VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT (trade_date, snapshot_time, market_key)
+            DO UPDATE SET market_env=EXCLUDED.market_env,
+                          status=EXCLUDED.status,
+                          action=EXCLUDED.action,
+                          trade_allowed=EXCLUDED.trade_allowed,
+                          raw_count=EXCLUDED.raw_count,
+                          candidate_count=EXCLUDED.candidate_count,
+                          source=EXCLUDED.source,
+                          updated_at=CURRENT_TIMESTAMP
+            ''',
+            (
+                date,
+                snapshot,
+                _mainline_market_env_key(markets),
+                json.dumps(_json_safe(market_env), ensure_ascii=False),
+                market_env.get('status') or '',
+                market_env.get('action') or '',
+                trade_allowed_text,
+                int(raw_count or 0),
+                int(candidate_count or 0),
+                source,
+            )
+        )
+    except Exception as e:
+        log.warning("保存市场环境快照失败 %s %s: %s", date, snapshot, e)
+
+
+def _load_mainline_market_env_snapshot(date: str, snapshot: str,
+                                       markets: list[str]) -> dict | None:
+    try:
+        _ensure_mainline_recommend_tables()
+        rows = mdb.executeSqlFetch(
+            '''
+            SELECT market_env
+            FROM cn_mainline_market_env_snapshot
+            WHERE trade_date=%s AND snapshot_time=%s AND market_key=%s
+            ''',
+            (date, snapshot, _mainline_market_env_key(markets))
+        ) or []
+        if not rows or not isinstance(rows[0][0], dict):
+            return None
+        return rows[0][0]
+    except Exception as e:
+        log.warning("读取市场环境快照失败 %s %s: %s", date, snapshot, e)
+        return None
+
+
+def _load_mainline_recommend_snapshot(date: str, snapshot: str,
+                                      param_key: str) -> list[dict] | None:
+    try:
+        _ensure_mainline_recommend_tables()
+        meta = mdb.executeSqlFetch(
+            '''
+            SELECT batch_id, candidate_count
+            FROM cn_mainline_recommend_snapshot_meta
+            WHERE trade_date=%s AND snapshot_time=%s AND param_key=%s
+            ''',
+            (date, snapshot, param_key)
+        ) or []
+        if not meta:
+            return None
+        batch_id = str(meta[0][0])
+        rows = mdb.executeSqlFetch(
+            '''
+            SELECT code, page_rank, core_score, trade_mode, mainline_theme,
+                   risk_tags, recommend_count, max_consecutive_count,
+                   recommend_snapshots, payload_json
+            FROM cn_mainline_recommend_snapshot
+            WHERE trade_date=%s AND snapshot_time=%s AND param_key=%s AND batch_id=%s
+            ORDER BY page_rank NULLS LAST, code
+            ''',
+            (date, snapshot, param_key, batch_id)
+        ) or []
+        return [
+            {
+                'code': str(r[0]).zfill(6),
+                'page_rank': r[1],
+                'core_score': float(r[2]) if r[2] is not None else None,
+                'trade_mode': r[3] or '',
+                'mainline_theme': r[4] or '',
+                'risk_tags': r[5] or '',
+                'recommend_count': int(r[6] or 0),
+                'max_consecutive_count': int(r[7] or 0),
+                'recommend_snapshots': r[8] or '',
+                'payload_json': r[9] or {},
+            }
+            for r in rows
+        ]
+    except Exception as e:
+        log.warning("读取主线推荐快照失败 %s %s: %s", date, snapshot, e)
+        return None
+
+
+def _mainline_snapshot_payload_rows(snapshot_rows: list[dict]) -> list[dict]:
+    """把已落库的完整候选快照还原为主线列表的原始行。"""
+    rows = []
+    for saved in snapshot_rows or []:
+        payload = saved.get('payload_json') or {}
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError):
+                payload = {}
+        if not isinstance(payload, dict):
+            continue
+        item = payload.copy()
+        code = str(saved.get('code') or item.get('code') or '').zfill(6)
+        if not code:
+            continue
+        item['code'] = code
+        # 旧批次可能缺少部分展示字段，以快照主表中的列作为兜底。
+        for field in ('page_rank', 'core_score', 'trade_mode', 'mainline_theme',
+                      'recommend_count', 'max_consecutive_count',
+                      'recommend_snapshots'):
+            if item.get(field) is None and saved.get(field) is not None:
+                item[field] = saved[field]
+        if not item.get('risk_tags') and saved.get('risk_tags'):
+            item['risk_tags'] = saved['risk_tags']
+        rows.append(item)
+    return rows
+
+
+def _mainline_recommend_snapshot_confirmed(date: str, snapshot: str,
+                                           param_key: str) -> bool:
+    """空候选池也可能是已计算的真实结论，避免每次查询都重复回放。"""
+    try:
+        _ensure_mainline_recommend_tables()
+        rows = mdb.executeSqlFetch(
+            '''
+            SELECT snapshot_confirmed
+            FROM cn_mainline_recommend_snapshot_meta
+            WHERE trade_date=%s AND snapshot_time=%s AND param_key=%s
+            ''',
+            (date, snapshot, param_key)
+        ) or []
+        return bool(rows and rows[0][0])
+    except Exception as e:
+        log.warning("读取主线推荐快照确认状态失败 %s %s: %s", date, snapshot, e)
+        return False
+
+
+def _save_mainline_recommend_snapshot(date: str, snapshot: str,
+                                      param_key: str, param_text: str,
+                                      rows: list[dict],
+                                      snapshot_confirmed: bool | None = None) -> None:
+    try:
+        _ensure_mainline_recommend_tables()
+        if snapshot_confirmed is None:
+            # 历史日期的数据已经定格；当天则只有对应分钟线到位后才确认。
+            latest_time = _latest_minute_time(date) if date == _today() else ''
+            snapshot_confirmed = date != _today() or bool(latest_time and snapshot <= latest_time)
+        batch_id = str(uuid.uuid4())
+        values = []
+        for row in rows:
+            code = str(row.get('code') or '').zfill(6)
+            if not code:
+                continue
+            risks = row.get('risk_tags') or []
+            if isinstance(risks, list):
+                risk_text = ' / '.join(str(v) for v in risks if v)
+            else:
+                risk_text = str(risks or '')
+            values.append(
+                (
+                    date,
+                    snapshot,
+                    param_key,
+                    code,
+                    batch_id,
+                    row.get('page_rank'),
+                    row.get('core_score'),
+                    row.get('trade_mode') or '',
+                    row.get('mainline_theme') or row.get('trade_theme') or row.get('best_sector') or '',
+                    risk_text,
+                    int(row.get('recommend_count') or 0),
+                    int(row.get('max_consecutive_count') or 0),
+                    row.get('recommend_snapshots') or row.get('recommend_snapshots_text') or '',
+                    psycopg2.extras.Json(_json_safe(row.get('payload_json') or row)),
+                )
+            )
+        with mdb.get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    '''
+                    INSERT INTO cn_mainline_recommend_snapshot_meta
+                        (trade_date, snapshot_time, param_key, param_text,
+                         candidate_count, snapshot_confirmed, batch_id, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (trade_date, snapshot_time, param_key)
+                    DO UPDATE SET param_text=EXCLUDED.param_text,
+                                  candidate_count=EXCLUDED.candidate_count,
+                                  snapshot_confirmed=EXCLUDED.snapshot_confirmed,
+                                  batch_id=EXCLUDED.batch_id,
+                                  updated_at=CURRENT_TIMESTAMP
+                    ''',
+                    (date, snapshot, param_key, param_text, len(values), bool(snapshot_confirmed), batch_id)
+                )
+                if values:
+                    psycopg2.extras.execute_values(
+                        cur,
+                        '''
+                        INSERT INTO cn_mainline_recommend_snapshot
+                            (trade_date, snapshot_time, param_key, code, batch_id,
+                             page_rank, core_score, trade_mode, mainline_theme, risk_tags,
+                             recommend_count, max_consecutive_count, recommend_snapshots,
+                             payload_json,
+                             updated_at)
+                        VALUES %s
+                        ON CONFLICT (trade_date, snapshot_time, param_key, code)
+                        DO UPDATE SET batch_id=EXCLUDED.batch_id,
+                                      page_rank=EXCLUDED.page_rank,
+                                      core_score=EXCLUDED.core_score,
+                                      trade_mode=EXCLUDED.trade_mode,
+                                      mainline_theme=EXCLUDED.mainline_theme,
+                                      risk_tags=EXCLUDED.risk_tags,
+                                      recommend_count=EXCLUDED.recommend_count,
+                                      max_consecutive_count=EXCLUDED.max_consecutive_count,
+                                      recommend_snapshots=EXCLUDED.recommend_snapshots,
+                                      payload_json=EXCLUDED.payload_json,
+                                      updated_at=CURRENT_TIMESTAMP
+                        ''',
+                        values,
+                        template='(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)',
+                        page_size=500,
+                    )
+    except Exception as e:
+        log.warning("保存主线推荐快照失败 %s %s: %s", date, snapshot, e)
+
+
+def _mainline_recommend_snapshots(snapshot: str) -> list[str]:
+    start = _snapshot_minutes(MAINLINE_RECOMMEND_START)
+    end_limit = _snapshot_minutes(MAINLINE_RECOMMEND_END)
+    end = _snapshot_minutes(snapshot)
+    if start is None or end_limit is None or end is None:
+        return []
+    end = min(end, end_limit)
+    if end < start:
+        return []
+    return [f'{m // 60:02d}:{m % 60:02d}' for m in range(start, end + 1)]
+
+
+def _mainline_max_streak(snapshots: list[str]) -> int:
+    indexes = sorted(i for i in (_snapshot_minutes(s) for s in snapshots) if i is not None)
+    if not indexes:
+        return 0
+    best = 1
+    current = 1
+    for prev, cur in zip(indexes, indexes[1:]):
+        if cur == prev + 1:
+            current += 1
+        else:
+            current = 1
+        best = max(best, current)
+    return best
+
+
+def _minute_add(time_text: str, minutes: int) -> str:
+    base = _snapshot_minutes(time_text)
+    if base is None:
+        return time_text
+    target = base + int(minutes or 0)
+    return f'{target // 60:02d}:{target % 60:02d}'
+
+
+def _next_trade_date(date: str) -> str:
+    rows = mdb.executeSqlFetch(
+        'SELECT MIN("date") FROM cn_stock_minute_bar WHERE "date" > %s',
+        (date,)
+    ) or []
+    return str(rows[0][0]) if rows and rows[0][0] else ''
+
+
+def _pct_return(price: float | None, base: float | None) -> float | None:
+    if price is None or base is None:
+        return None
+    try:
+        price_f = float(price)
+        base_f = float(base)
+        if base_f <= 0:
+            return None
+        return round((price_f / base_f - 1) * 100, 2)
+    except Exception:
+        return None
+
+
+def _latest_snapshot_trade_date() -> str:
+    rows = mdb.executeSqlFetch(
+        '''
+        SELECT MAX(trade_date)
+        FROM cn_mainline_recommend_snapshot_meta
+        WHERE param_text LIKE %s
+        ''',
+        ('%limit=300%',)
+    ) or []
+    return str(rows[0][0]) if rows and rows[0][0] else _today()
+
+
+def _daily_close_map(date: str, codes: list[str]) -> dict[str, float]:
+    if not date or not codes:
+        return {}
+    rows = mdb.executeSqlFetch(
+        '''
+        SELECT code, close
+        FROM cn_stock_hist_data
+        WHERE "date"=%s AND code = ANY(%s)
+        ''',
+        (date, codes)
+    ) or []
+    return {str(r[0]).zfill(6): float(r[1]) for r in rows if r[1] is not None}
+
+
+def _minute_rows_map(date: str, codes: list[str], start: str = '09:30',
+                     end: str = '15:00') -> dict[str, list[dict]]:
+    if not date or not codes:
+        return {}
+    rows = mdb.executeSqlFetch(
+        '''
+        SELECT code, time, close, high
+        FROM cn_stock_minute_bar
+        WHERE "date"=%s AND code = ANY(%s) AND time >= %s AND time <= %s
+        ORDER BY code, time
+        ''',
+        (date, codes, start, end)
+    ) or []
+    out: dict[str, list[dict]] = {}
+    for code, time_text, close, high in rows:
+        out.setdefault(str(code).zfill(6), []).append({
+            'time': str(time_text)[:5],
+            'close': float(close) if close is not None else None,
+            'high': float(high) if high is not None else None,
+        })
+    return out
+
+
+def _first_bar_at_or_after(bars: list[dict], time_text: str) -> dict | None:
+    for bar in bars or []:
+        if str(bar.get('time') or '') >= time_text:
+            return bar
+    return None
+
+
+def _last_bar_at_or_before(bars: list[dict], time_text: str) -> dict | None:
+    last = None
+    for bar in bars or []:
+        if str(bar.get('time') or '') <= time_text:
+            last = bar
+        else:
+            break
+    return last
+
+
+def _max_high_at_or_before(bars: list[dict], time_text: str) -> float | None:
+    highs = [
+        float(bar['high']) for bar in bars or []
+        if str(bar.get('time') or '') <= time_text and bar.get('high') is not None
+    ]
+    return max(highs) if highs else None
+
+
+def _ensure_strategy_validation_tables() -> None:
+    mdb.executeSql(
+        '''
+        CREATE TABLE IF NOT EXISTS cn_strategy_validation_result (
+            strategy_name VARCHAR(50) NOT NULL,
+            trade_date DATE NOT NULL,
+            buy_delay INTEGER NOT NULL,
+            next_cutoff VARCHAR(5) NOT NULL,
+            code VARCHAR(6) NOT NULL,
+            name VARCHAR(80),
+            first_snapshot VARCHAR(5),
+            buy_time VARCHAR(5),
+            buy_actual_time VARCHAR(5),
+            buy_price NUMERIC,
+            recommend_count INTEGER DEFAULT 0,
+            recommend_snapshots TEXT,
+            ever_buyable BOOLEAN DEFAULT FALSE,
+            max_core_score NUMERIC,
+            modes TEXT,
+            buy_statuses TEXT,
+            mainlines TEXT,
+            risk_tags TEXT,
+            same_day_close NUMERIC,
+            same_day_return_pct NUMERIC,
+            next_date DATE,
+            next_0940_price NUMERIC,
+            next_0940_return_pct NUMERIC,
+            next_0940_max_return_pct NUMERIC,
+            next_close NUMERIC,
+            next_close_return_pct NUMERIC,
+            judged_mainline_hit BOOLEAN DEFAULT FALSE,
+            actual_mainline_hit BOOLEAN DEFAULT FALSE,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (strategy_name, trade_date, buy_delay, next_cutoff, code)
+        )
+        '''
+    )
+    for sql in (
+        'ALTER TABLE cn_strategy_validation_result ADD COLUMN IF NOT EXISTS judged_mainline_hit BOOLEAN DEFAULT FALSE',
+        'ALTER TABLE cn_strategy_validation_result ADD COLUMN IF NOT EXISTS actual_mainline_hit BOOLEAN DEFAULT FALSE',
+    ):
+        mdb.executeSql(sql)
+    mdb.executeSql(
+        '''
+        CREATE INDEX IF NOT EXISTS idx_strategy_validation_result_date
+        ON cn_strategy_validation_result (trade_date, buy_delay, next_cutoff)
+        '''
+    )
+    mdb.executeSql(
+        '''
+        CREATE TABLE IF NOT EXISTS cn_strategy_validation_mainline (
+            strategy_name VARCHAR(50) NOT NULL,
+            trade_date DATE NOT NULL,
+            judged_mainlines TEXT,
+            judged_detail JSONB,
+            actual_mainlines TEXT,
+            actual_detail JSONB,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (strategy_name, trade_date)
+        )
+        '''
+    )
+    mdb.executeSql(
+        '''
+        CREATE TABLE IF NOT EXISTS cn_strategy_validation_limitup_detail (
+            strategy_name VARCHAR(50) NOT NULL,
+            trade_date DATE NOT NULL,
+            buy_delay INTEGER NOT NULL,
+            next_cutoff VARCHAR(5) NOT NULL,
+            code VARCHAR(6) NOT NULL,
+            name VARCHAR(80),
+            board VARCHAR(20),
+            trade_theme VARCHAR(120),
+            close_price NUMERIC,
+            quote_change NUMERIC,
+            amount NUMERIC,
+            limitup_reason TEXT,
+            in_candidate_pool BOOLEAN DEFAULT FALSE,
+            candidate_reason TEXT,
+            miss_reason TEXT,
+            recommend_count INTEGER DEFAULT 0,
+            first_snapshot VARCHAR(5),
+            buy_statuses TEXT,
+            modes TEXT,
+            risk_tags TEXT,
+            judged_mainline_hit BOOLEAN DEFAULT FALSE,
+            actual_mainline_hit BOOLEAN DEFAULT FALSE,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (strategy_name, trade_date, buy_delay, next_cutoff, code)
+        )
+        '''
+    )
+    mdb.executeSql(
+        '''
+        CREATE TABLE IF NOT EXISTS cn_strategy_validation_limitup_theme (
+            strategy_name VARCHAR(50) NOT NULL,
+            trade_date DATE NOT NULL,
+            buy_delay INTEGER NOT NULL,
+            next_cutoff VARCHAR(5) NOT NULL,
+            trade_theme VARCHAR(120) NOT NULL,
+            limitup_count INTEGER DEFAULT 0,
+            in_pool_count INTEGER DEFAULT 0,
+            avg_quote_change NUMERIC,
+            total_amount NUMERIC,
+            sample_codes TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (strategy_name, trade_date, buy_delay, next_cutoff, trade_theme)
+        )
+        '''
+    )
+    mdb.executeSql(
+        '''
+        CREATE TABLE IF NOT EXISTS cn_strategy_validation_experiment_config (
+            strategy_id VARCHAR(100) PRIMARY KEY,
+            strategy_name VARCHAR(80) NOT NULL,
+            version VARCHAR(40) NOT NULL,
+            rule_json JSONB NOT NULL,
+            description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        '''
+    )
+
+
+def _theme_tokens(text: str) -> set[str]:
+    return {
+        item.strip() for item in str(text or '').replace('、', '/').split('/')
+        if item.strip()
+    }
+
+
+def _mainline_hit(row_mainlines: str, target_themes: list[str]) -> bool:
+    row_tokens = _theme_tokens(row_mainlines)
+    target_tokens = {str(t).strip() for t in target_themes if str(t).strip()}
+    return bool(row_tokens & target_tokens)
+
+
+def _validation_judged_mainlines(date: str) -> list[dict]:
+    rows = mdb.executeSqlFetch(
+        '''
+        SELECT
+            s.mainline_theme,
+            COUNT(*) AS appear_count,
+            COUNT(DISTINCT s.code) AS stock_count,
+            ROUND(AVG(s.core_score)::numeric, 1) AS avg_core_score,
+            ROUND(MAX(s.core_score)::numeric, 1) AS max_core_score
+        FROM cn_mainline_recommend_snapshot s
+        JOIN cn_mainline_recommend_snapshot_meta m
+          ON m.trade_date=s.trade_date
+         AND m.snapshot_time=s.snapshot_time
+         AND m.param_key=s.param_key
+         AND m.batch_id=s.batch_id
+        WHERE s.trade_date=%s
+          AND s.snapshot_time < '10:00'
+          AND m.param_text LIKE %s
+          AND COALESCE(s.mainline_theme, '') <> ''
+        GROUP BY s.mainline_theme
+        HAVING COUNT(DISTINCT s.code) >= 3
+        ORDER BY COUNT(*) DESC, MAX(s.core_score) DESC NULLS LAST
+        LIMIT 12
+        ''',
+        (date, '%limit=300%')
+    ) or []
+    if not rows:
+        return []
+    top_count = max(int(r[1] or 0) for r in rows)
+    out = []
+    for r in rows:
+        appear_count = int(r[1] or 0)
+        if len(out) >= 5:
+            break
+        if appear_count < max(8, top_count * 0.28):
+            continue
+        out.append({
+            'theme': r[0],
+            'appear_count': appear_count,
+            'stock_count': int(r[2] or 0),
+            'avg_core_score': float(r[3]) if r[3] is not None else None,
+            'max_core_score': float(r[4]) if r[4] is not None else None,
+        })
+    return out
+
+
+def _validation_actual_mainlines(date: str) -> list[dict]:
+    rows = mdb.executeSqlFetch(
+        '''
+        SELECT
+            t.trade_theme,
+            COUNT(*) AS stock_count,
+            ROUND(AVG(h.quote_change)::numeric, 2) AS avg_ret,
+            ROUND(MAX(h.quote_change)::numeric, 2) AS max_ret,
+            COUNT(*) FILTER (WHERE h.quote_change > 0) AS up_count,
+            COUNT(*) FILTER (WHERE h.quote_change >= 5) AS ret5_count,
+            COUNT(*) FILTER (WHERE h.quote_change >= 8) AS ret8_count,
+            ROUND(SUM(COALESCE(h.amount, 0))::numeric, 2) AS total_amount
+        FROM cn_stock_hist_data h
+        JOIN cn_stock_trade_theme t ON t.code = h.code
+        WHERE h."date"=%s
+          AND (h.code LIKE '30%%' OR h.code LIKE '68%%' OR h.code LIKE '92%%')
+          AND COALESCE(t.trade_theme, '') <> ''
+        GROUP BY t.trade_theme
+        HAVING COUNT(*) >= 3
+        ORDER BY
+            (COUNT(*) FILTER (WHERE h.quote_change >= 8)) DESC,
+            (COUNT(*) FILTER (WHERE h.quote_change >= 5)) DESC,
+            AVG(h.quote_change) DESC,
+            SUM(COALESCE(h.amount, 0)) DESC
+        LIMIT 18
+        ''',
+        (date,)
+    ) or []
+    scored = []
+    for r in rows:
+        stock_count = int(r[1] or 0)
+        avg_ret = float(r[2]) if r[2] is not None else 0.0
+        max_ret = float(r[3]) if r[3] is not None else 0.0
+        up_count = int(r[4] or 0)
+        ret5_count = int(r[5] or 0)
+        ret8_count = int(r[6] or 0)
+        amount = float(r[7]) if r[7] is not None else 0.0
+        up_rate = up_count / stock_count * 100 if stock_count else 0.0
+        score = ret8_count * 8 + ret5_count * 5 + avg_ret * 2 + up_rate * 0.08 + max_ret * 0.5
+        if ret5_count < 2 and avg_ret < 2.5:
+            continue
+        scored.append({
+            'theme': r[0],
+            'stock_count': stock_count,
+            'avg_ret': round(avg_ret, 2),
+            'max_ret': round(max_ret, 2),
+            'up_rate': round(up_rate, 2),
+            'ret5_count': ret5_count,
+            'ret8_count': ret8_count,
+            'total_amount': round(amount, 2),
+            'score': round(score, 2),
+        })
+    scored.sort(key=lambda x: (-x['score'], -x['ret8_count'], -x['ret5_count'], -x['avg_ret']))
+    if not scored:
+        return []
+    top_score = scored[0]['score']
+    return [item for item in scored[:8] if item['score'] >= top_score * 0.45][:5]
+
+
+def _strategy_validation_mainlines(date: str, refresh: bool = False) -> dict:
+    _ensure_strategy_validation_tables()
+    if not refresh:
+        rows = mdb.executeSqlFetch(
+            '''
+            SELECT judged_mainlines, judged_detail, actual_mainlines, actual_detail
+            FROM cn_strategy_validation_mainline
+            WHERE strategy_name=%s AND trade_date=%s
+            ''',
+            ('mainline_relay', date)
+        ) or []
+        if rows:
+            return {
+                'judged_mainlines': rows[0][0] or '',
+                'judged_detail': rows[0][1] or [],
+                'actual_mainlines': rows[0][2] or '',
+                'actual_detail': rows[0][3] or [],
+                'cached': True,
+            }
+
+    judged_detail = _validation_judged_mainlines(date)
+    actual_detail = _validation_actual_mainlines(date)
+    judged_mainlines = ' / '.join(item['theme'] for item in judged_detail)
+    actual_mainlines = ' / '.join(item['theme'] for item in actual_detail)
+    with mdb.get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                '''
+                INSERT INTO cn_strategy_validation_mainline
+                    (strategy_name, trade_date, judged_mainlines, judged_detail,
+                     actual_mainlines, actual_detail, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT (strategy_name, trade_date)
+                DO UPDATE SET judged_mainlines=EXCLUDED.judged_mainlines,
+                              judged_detail=EXCLUDED.judged_detail,
+                              actual_mainlines=EXCLUDED.actual_mainlines,
+                              actual_detail=EXCLUDED.actual_detail,
+                              updated_at=CURRENT_TIMESTAMP
+                ''',
+                (
+                    'mainline_relay',
+                    date,
+                    judged_mainlines,
+                    psycopg2.extras.Json(_json_safe(judged_detail)),
+                    actual_mainlines,
+                    psycopg2.extras.Json(_json_safe(actual_detail)),
+                )
+            )
+    return {
+        'judged_mainlines': judged_mainlines,
+        'judged_detail': judged_detail,
+        'actual_mainlines': actual_mainlines,
+        'actual_detail': actual_detail,
+        'cached': False,
+    }
+
+
+def _annotate_validation_mainline_hits(data: list[dict], mainline_info: dict) -> bool:
+    judged = [item.get('theme') for item in mainline_info.get('judged_detail') or []]
+    actual = [item.get('theme') for item in mainline_info.get('actual_detail') or []]
+    changed = False
+    for row in data:
+        judged_hit = _mainline_hit(row.get('mainlines') or '', judged)
+        actual_hit = _mainline_hit(row.get('mainlines') or '', actual)
+        if row.get('judged_mainline_hit') != judged_hit or row.get('actual_mainline_hit') != actual_hit:
+            changed = True
+        row['judged_mainline_hit'] = judged_hit
+        row['actual_mainline_hit'] = actual_hit
+    return changed
+
+
+def _limitup_board(code: str) -> str:
+    code = str(code or '').zfill(6)
+    if code.startswith('30'):
+        return '创业板'
+    if code.startswith('68'):
+        return '科创板'
+    if code.startswith('92'):
+        return '北交所'
+    if code.startswith('60'):
+        return '沪市主板'
+    if code.startswith('00'):
+        return '深市主板'
+    return '其他'
+
+
+def _limitup_threshold(code: str) -> float:
+    code = str(code or '').zfill(6)
+    if code.startswith('92'):
+        return 29.0
+    if code.startswith('30') or code.startswith('68'):
+        return 19.0
+    return 9.5
+
+
+def _limitup_upper_bound(code: str) -> float:
+    code = str(code or '').zfill(6)
+    if code.startswith('92'):
+        return 31.5
+    if code.startswith('30') or code.startswith('68'):
+        return 21.5
+    return 11.5
+
+
+def _load_strategy_validation_limitups(date: str, buy_delay: int,
+                                       next_cutoff: str) -> dict | None:
+    _ensure_strategy_validation_tables()
+    detail_rows = mdb.executeSqlFetch(
+        '''
+        SELECT code, name, board, trade_theme, close_price, quote_change, amount,
+               limitup_reason, in_candidate_pool, candidate_reason, miss_reason,
+               recommend_count, first_snapshot, buy_statuses, modes, risk_tags,
+               judged_mainline_hit, actual_mainline_hit
+        FROM cn_strategy_validation_limitup_detail
+        WHERE strategy_name=%s AND trade_date=%s AND buy_delay=%s AND next_cutoff=%s
+        ORDER BY in_candidate_pool DESC, quote_change DESC NULLS LAST, amount DESC NULLS LAST, code
+        ''',
+        ('mainline_relay', date, buy_delay, next_cutoff)
+    ) or []
+    theme_rows = mdb.executeSqlFetch(
+        '''
+        SELECT trade_theme, limitup_count, in_pool_count, avg_quote_change,
+               total_amount, sample_codes
+        FROM cn_strategy_validation_limitup_theme
+        WHERE strategy_name=%s AND trade_date=%s AND buy_delay=%s AND next_cutoff=%s
+        ORDER BY limitup_count DESC, in_pool_count DESC, avg_quote_change DESC NULLS LAST
+        ''',
+        ('mainline_relay', date, buy_delay, next_cutoff)
+    ) or []
+    if not detail_rows and not theme_rows:
+        return None
+    detail = []
+    for r in detail_rows:
+        detail.append({
+            'code': str(r[0]).zfill(6),
+            'name': r[1] or str(r[0]).zfill(6),
+            'board': r[2] or '',
+            'trade_theme': r[3] or '',
+            'close_price': float(r[4]) if r[4] is not None else None,
+            'quote_change': float(r[5]) if r[5] is not None else None,
+            'amount': float(r[6]) if r[6] is not None else None,
+            'limitup_reason': r[7] or '',
+            'in_candidate_pool': bool(r[8]),
+            'candidate_reason': r[9] or '',
+            'miss_reason': r[10] or '',
+            'recommend_count': int(r[11] or 0),
+            'first_snapshot': r[12] or '',
+            'buy_statuses': r[13] or '',
+            'modes': r[14] or '',
+            'risk_tags': r[15] or '',
+            'judged_mainline_hit': bool(r[16]),
+            'actual_mainline_hit': bool(r[17]),
+        })
+    themes = []
+    for r in theme_rows:
+        themes.append({
+            'trade_theme': r[0] or '',
+            'limitup_count': int(r[1] or 0),
+            'in_pool_count': int(r[2] or 0),
+            'avg_quote_change': float(r[3]) if r[3] is not None else None,
+            'total_amount': float(r[4]) if r[4] is not None else None,
+            'sample_codes': r[5] or '',
+        })
+    return {
+        'summary': {
+            'limitup_count': len(detail),
+            'in_pool_count': sum(1 for item in detail if item['in_candidate_pool']),
+            'missed_count': sum(1 for item in detail if not item['in_candidate_pool']),
+            'theme_count': len(themes),
+        },
+        'themes': themes,
+        'detail': detail,
+        'cached': True,
+    }
+
+
+def _candidate_limitup_reason(row: dict) -> str:
+    parts = [
+        f"首次{row.get('first_snapshot') or '-'}",
+        f"出现{int(row.get('recommend_count') or 0)}次",
+    ]
+    if row.get('buy_statuses'):
+        parts.append(f"买入状态:{row.get('buy_statuses')}")
+    if row.get('modes'):
+        parts.append(f"模式:{row.get('modes')}")
+    if row.get('risk_tags'):
+        parts.append(f"风险:{row.get('risk_tags')}")
+    return '；'.join(parts)
+
+
+def _limitup_miss_reason(code: str, theme: str, mainline_info: dict) -> str:
+    board = _limitup_board(code)
+    parts = ['未进入09:35-09:50候选池']
+    if code.startswith('60') or code.startswith('00'):
+        parts.append('非当前偏好市场(主板)')
+    judged = [item.get('theme') for item in mainline_info.get('judged_detail') or []]
+    actual = [item.get('theme') for item in mainline_info.get('actual_detail') or []]
+    if theme and theme not in judged:
+        parts.append('不属于10点前判定主线')
+    if theme and theme in actual:
+        parts.append('收盘证明属于实际主线，属于重点漏检')
+    elif theme and theme not in actual:
+        parts.append('不属于收盘实际主线')
+    parts.append(f'市场:{board}')
+    return '；'.join(parts)
+
+
+def _calc_strategy_validation_limitups(date: str, buy_delay: int, next_cutoff: str,
+                                       data: list[dict], mainline_info: dict) -> dict:
+    rows = mdb.executeSqlFetch(
+        '''
+        SELECT h.code,
+               COALESCE(l.name, t.name, h.code) AS name,
+               COALESCE(t.trade_theme, '') AS trade_theme,
+               h.close,
+               h.quote_change,
+               h.amount,
+               COALESCE(l.reason, l.title, '') AS limitup_reason
+        FROM cn_stock_hist_data h
+        LEFT JOIN cn_stock_trade_theme t ON t.code = h.code
+        LEFT JOIN cn_stock_limitup_reason l ON l.date = h."date" AND l.code = h.code
+        WHERE h."date"=%s
+          AND h.quote_change IS NOT NULL
+          AND (
+              (h.code LIKE '92%%' AND h.quote_change BETWEEN 29.0 AND 31.5)
+              OR ((h.code LIKE '30%%' OR h.code LIKE '68%%') AND h.quote_change BETWEEN 19.0 AND 21.5)
+              OR ((h.code LIKE '00%%' OR h.code LIKE '60%%') AND h.quote_change BETWEEN 9.5 AND 11.5)
+          )
+        ORDER BY h.quote_change DESC, h.amount DESC NULLS LAST
+        ''',
+        (date,)
+    ) or []
+    candidates = {str(row.get('code')).zfill(6): row for row in data}
+    detail = []
+    for r in rows:
+        code = str(r[0]).zfill(6)
+        quote_change = float(r[4]) if r[4] is not None else 0.0
+        if quote_change < _limitup_threshold(code) or quote_change > _limitup_upper_bound(code):
+            continue
+        cand = candidates.get(code)
+        theme = r[2] or ''
+        item = {
+            'code': code,
+            'name': r[1] or code,
+            'board': _limitup_board(code),
+            'trade_theme': theme,
+            'close_price': float(r[3]) if r[3] is not None else None,
+            'quote_change': quote_change,
+            'amount': float(r[5]) if r[5] is not None else None,
+            'limitup_reason': r[6] or '',
+            'in_candidate_pool': bool(cand),
+            'candidate_reason': _candidate_limitup_reason(cand) if cand else '',
+            'miss_reason': '' if cand else _limitup_miss_reason(code, theme, mainline_info),
+            'recommend_count': int(cand.get('recommend_count') or 0) if cand else 0,
+            'first_snapshot': cand.get('first_snapshot') if cand else '',
+            'buy_statuses': cand.get('buy_statuses') if cand else '',
+            'modes': cand.get('modes') if cand else '',
+            'risk_tags': cand.get('risk_tags') if cand else '',
+            'judged_mainline_hit': bool(cand.get('judged_mainline_hit')) if cand else _mainline_hit(theme, [x.get('theme') for x in mainline_info.get('judged_detail') or []]),
+            'actual_mainline_hit': bool(cand.get('actual_mainline_hit')) if cand else _mainline_hit(theme, [x.get('theme') for x in mainline_info.get('actual_detail') or []]),
+        }
+        detail.append(item)
+
+    theme_map: dict[str, dict] = {}
+    for item in detail:
+        theme = item.get('trade_theme') or '未归类'
+        stat = theme_map.setdefault(theme, {
+            'trade_theme': theme,
+            'limitup_count': 0,
+            'in_pool_count': 0,
+            'quote_changes': [],
+            'total_amount': 0.0,
+            'codes': [],
+        })
+        stat['limitup_count'] += 1
+        if item.get('in_candidate_pool'):
+            stat['in_pool_count'] += 1
+        if item.get('quote_change') is not None:
+            stat['quote_changes'].append(float(item['quote_change']))
+        if item.get('amount') is not None:
+            stat['total_amount'] += float(item['amount'])
+        stat['codes'].append(f"{item['code']} {item['name']}")
+    themes = []
+    for stat in theme_map.values():
+        vals = stat.pop('quote_changes')
+        codes = stat.pop('codes')
+        stat['avg_quote_change'] = round(sum(vals) / len(vals), 2) if vals else None
+        stat['total_amount'] = round(stat['total_amount'], 2)
+        stat['sample_codes'] = ' / '.join(codes[:6])
+        themes.append(stat)
+    themes.sort(key=lambda x: (-x['limitup_count'], -x['in_pool_count'], -(x.get('avg_quote_change') or 0)))
+    return {
+        'summary': {
+            'limitup_count': len(detail),
+            'in_pool_count': sum(1 for item in detail if item['in_candidate_pool']),
+            'missed_count': sum(1 for item in detail if not item['in_candidate_pool']),
+            'theme_count': len(themes),
+        },
+        'themes': themes,
+        'detail': detail,
+        'cached': False,
+    }
+
+
+def _save_strategy_validation_limitups(date: str, buy_delay: int, next_cutoff: str,
+                                       info: dict) -> None:
+    _ensure_strategy_validation_tables()
+    with mdb.get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                '''
+                DELETE FROM cn_strategy_validation_limitup_detail
+                WHERE strategy_name=%s AND trade_date=%s AND buy_delay=%s AND next_cutoff=%s
+                ''',
+                ('mainline_relay', date, buy_delay, next_cutoff)
+            )
+            cur.execute(
+                '''
+                DELETE FROM cn_strategy_validation_limitup_theme
+                WHERE strategy_name=%s AND trade_date=%s AND buy_delay=%s AND next_cutoff=%s
+                ''',
+                ('mainline_relay', date, buy_delay, next_cutoff)
+            )
+            detail_values = []
+            for item in info.get('detail') or []:
+                detail_values.append((
+                    'mainline_relay', date, buy_delay, next_cutoff,
+                    item.get('code'), item.get('name'), item.get('board'),
+                    item.get('trade_theme'), item.get('close_price'),
+                    item.get('quote_change'), item.get('amount'),
+                    item.get('limitup_reason') or '',
+                    bool(item.get('in_candidate_pool')),
+                    item.get('candidate_reason') or '',
+                    item.get('miss_reason') or '',
+                    int(item.get('recommend_count') or 0),
+                    item.get('first_snapshot') or '',
+                    item.get('buy_statuses') or '',
+                    item.get('modes') or '',
+                    item.get('risk_tags') or '',
+                    bool(item.get('judged_mainline_hit')),
+                    bool(item.get('actual_mainline_hit')),
+                ))
+            if detail_values:
+                psycopg2.extras.execute_values(
+                    cur,
+                    '''
+                    INSERT INTO cn_strategy_validation_limitup_detail
+                        (strategy_name, trade_date, buy_delay, next_cutoff, code,
+                         name, board, trade_theme, close_price, quote_change,
+                         amount, limitup_reason, in_candidate_pool,
+                         candidate_reason, miss_reason, recommend_count,
+                         first_snapshot, buy_statuses, modes, risk_tags,
+                         judged_mainline_hit, actual_mainline_hit, updated_at)
+                    VALUES %s
+                    ON CONFLICT (strategy_name, trade_date, buy_delay, next_cutoff, code)
+                    DO UPDATE SET name=EXCLUDED.name,
+                                  board=EXCLUDED.board,
+                                  trade_theme=EXCLUDED.trade_theme,
+                                  close_price=EXCLUDED.close_price,
+                                  quote_change=EXCLUDED.quote_change,
+                                  amount=EXCLUDED.amount,
+                                  limitup_reason=EXCLUDED.limitup_reason,
+                                  in_candidate_pool=EXCLUDED.in_candidate_pool,
+                                  candidate_reason=EXCLUDED.candidate_reason,
+                                  miss_reason=EXCLUDED.miss_reason,
+                                  recommend_count=EXCLUDED.recommend_count,
+                                  first_snapshot=EXCLUDED.first_snapshot,
+                                  buy_statuses=EXCLUDED.buy_statuses,
+                                  modes=EXCLUDED.modes,
+                                  risk_tags=EXCLUDED.risk_tags,
+                                  judged_mainline_hit=EXCLUDED.judged_mainline_hit,
+                                  actual_mainline_hit=EXCLUDED.actual_mainline_hit,
+                                  updated_at=CURRENT_TIMESTAMP
+                    ''',
+                    detail_values,
+                    template='(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)',
+                    page_size=500,
+                )
+            theme_values = []
+            for item in info.get('themes') or []:
+                theme_values.append((
+                    'mainline_relay', date, buy_delay, next_cutoff,
+                    item.get('trade_theme') or '未归类',
+                    int(item.get('limitup_count') or 0),
+                    int(item.get('in_pool_count') or 0),
+                    item.get('avg_quote_change'),
+                    item.get('total_amount'),
+                    item.get('sample_codes') or '',
+                ))
+            if theme_values:
+                psycopg2.extras.execute_values(
+                    cur,
+                    '''
+                    INSERT INTO cn_strategy_validation_limitup_theme
+                        (strategy_name, trade_date, buy_delay, next_cutoff,
+                         trade_theme, limitup_count, in_pool_count,
+                         avg_quote_change, total_amount, sample_codes, updated_at)
+                    VALUES %s
+                    ON CONFLICT (strategy_name, trade_date, buy_delay, next_cutoff, trade_theme)
+                    DO UPDATE SET limitup_count=EXCLUDED.limitup_count,
+                                  in_pool_count=EXCLUDED.in_pool_count,
+                                  avg_quote_change=EXCLUDED.avg_quote_change,
+                                  total_amount=EXCLUDED.total_amount,
+                                  sample_codes=EXCLUDED.sample_codes,
+                                  updated_at=CURRENT_TIMESTAMP
+                    ''',
+                    theme_values,
+                    template='(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)',
+                    page_size=500,
+                )
+
+
+def _strategy_validation_limitups(date: str, buy_delay: int, next_cutoff: str,
+                                  data: list[dict], mainline_info: dict,
+                                  refresh: bool = False) -> dict:
+    if not refresh:
+        cached = _load_strategy_validation_limitups(date, buy_delay, next_cutoff)
+        if cached is not None:
+            return cached
+    info = _calc_strategy_validation_limitups(date, buy_delay, next_cutoff, data, mainline_info)
+    _save_strategy_validation_limitups(date, buy_delay, next_cutoff, info)
+    return info
+
+
+def _strategy_validation_summary(data: list[dict]) -> dict:
+    def stat_for(field: str) -> dict:
+        vals = [item[field] for item in data if item.get(field) is not None]
+        if not vals:
+            return {'count': 0, 'win': 0, 'win_rate': None, 'avg': None}
+        wins = sum(1 for v in vals if v > 0)
+        return {
+            'count': len(vals),
+            'win': wins,
+            'win_rate': round(wins / len(vals) * 100, 2),
+            'avg': round(sum(vals) / len(vals), 2),
+        }
+
+    return {
+        'candidate_count': len(data),
+        'priced_count': sum(1 for item in data if item.get('buy_price') is not None),
+        'same_day': stat_for('same_day_return_pct'),
+        'next_0940': stat_for('next_0940_return_pct'),
+        'next_0940_max': stat_for('next_0940_max_return_pct'),
+        'next_close': stat_for('next_close_return_pct'),
+    }
+
+
+_V1_EXPERIMENT_ID = 'mainline_burst_capture_v1_accel_4'
+_V1_EXPERIMENT_RULE = {
+    'markets': ['创业板', '科创板', '京市A股'],
+    'ret_acceleration_min': 4.0,
+    'min_recommend_count': 0,
+    'keep_original_pool': True,
+    'decision_time': '09:50前',
+}
+
+
+def _experiment_stat(rows: list[dict]) -> dict:
+    def stat_for(field: str) -> dict:
+        values = [float(item[field]) for item in rows if item.get(field) is not None]
+        if not values:
+            return {'priced_count': 0, 'win_rate': None, 'avg': None}
+        return {
+            'priced_count': len(values),
+            'win_rate': round(sum(1 for value in values if value > 0) * 100 / len(values), 1),
+            'avg': round(sum(values) / len(values), 2),
+        }
+
+    return {
+        'candidate_count': len(rows),
+        'same_day': stat_for('same_day_return_pct'),
+        'next_0940': stat_for('next_0940_return_pct'),
+        'next_0940_max': stat_for('next_0940_max_return_pct'),
+        'next_close': stat_for('next_close_return_pct'),
+    }
+
+
+def _strategy_validation_experiment(buy_delay: int = 2,
+                                    next_cutoff: str = '09:40') -> dict:
+    """爆发捕捉V1只打标签，原始候选池始终保留。"""
+    _ensure_strategy_validation_tables()
+    mdb.executeSql(
+        '''
+        INSERT INTO cn_strategy_validation_experiment_config
+            (strategy_id, strategy_name, version, rule_json, description)
+        VALUES (%s, %s, %s, %s::jsonb, %s)
+        ON CONFLICT (strategy_id) DO NOTHING
+        ''',
+        (
+            _V1_EXPERIMENT_ID,
+            '爆发捕捉 V1',
+            'v1',
+            json.dumps(_V1_EXPERIMENT_RULE, ensure_ascii=False),
+            '保留原始候选池；仅标记首次入池至09:50涨幅加速不少于4%的爆发候选。',
+        )
+    )
+    rows = mdb.executeSqlFetch(
+        '''
+        WITH snapshot_metric AS (
+            SELECT s.trade_date, s.code,
+                   (array_agg(NULLIF(s.payload_json->>'ret_vs_prevclose', '')::numeric
+                    ORDER BY s.snapshot_time))[1] AS first_ret,
+                   (array_agg(NULLIF(s.payload_json->>'ret_vs_prevclose', '')::numeric
+                    ORDER BY s.snapshot_time DESC))[1] AS last_ret
+            FROM cn_mainline_recommend_snapshot s
+            JOIN cn_mainline_recommend_snapshot_meta m
+              ON m.trade_date=s.trade_date AND m.snapshot_time=s.snapshot_time
+             AND m.param_key=s.param_key AND m.batch_id=s.batch_id
+            WHERE m.param_text LIKE %s
+            GROUP BY s.trade_date, s.code
+        )
+        SELECT r.trade_date, r.code, r.recommend_count, r.same_day_return_pct,
+               r.next_0940_return_pct, r.next_0940_max_return_pct,
+               r.next_close_return_pct,
+               COALESCE(metric.last_ret - metric.first_ret, 0) AS ret_acceleration
+        FROM cn_strategy_validation_result r
+        JOIN snapshot_metric metric ON metric.trade_date=r.trade_date AND metric.code=r.code
+        WHERE r.strategy_name=%s AND r.buy_delay=%s AND r.next_cutoff=%s
+          AND r.next_date IS NOT NULL AND r.next_0940_return_pct IS NOT NULL
+        ORDER BY r.trade_date DESC, r.code
+        ''',
+        ('%limit=300%', 'mainline_relay', buy_delay, next_cutoff)
+    ) or []
+    data = [
+        {
+            'trade_date': str(row[0]),
+            'code': str(row[1]).zfill(6),
+            'recommend_count': int(row[2] or 0),
+            'same_day_return_pct': float(row[3]) if row[3] is not None else None,
+            'next_0940_return_pct': float(row[4]) if row[4] is not None else None,
+            'next_0940_max_return_pct': float(row[5]) if row[5] is not None else None,
+            'next_close_return_pct': float(row[6]) if row[6] is not None else None,
+            'ret_acceleration': float(row[7]) if row[7] is not None else None,
+        }
+        for row in rows
+    ]
+    experiment = [row for row in data if (row.get('ret_acceleration') or 0) >= 4]
+    grouped: dict[str, dict[str, list[dict]]] = {}
+    for row in data:
+        grouped.setdefault(row['trade_date'], {'baseline': [], 'experiment': []})['baseline'].append(row)
+        if (row.get('ret_acceleration') or 0) >= 4:
+            grouped[row['trade_date']]['experiment'].append(row)
+    daily = [
+        {
+            'trade_date': trade_date,
+            'baseline': _experiment_stat(groups['baseline']),
+            'experiment': _experiment_stat(groups['experiment']),
+            'opportunity_total': sum(
+                1 for row in groups['baseline']
+                if (row.get('same_day_return_pct') or 0) >= 10
+                or (row.get('next_0940_max_return_pct') or 0) >= 10
+            ),
+            'opportunity_captured': sum(
+                1 for row in groups['experiment']
+                if (row.get('same_day_return_pct') or 0) >= 10
+                or (row.get('next_0940_max_return_pct') or 0) >= 10
+            ),
+        }
+        for trade_date, groups in sorted(grouped.items(), reverse=True)
+    ]
+    return {
+        'strategy_id': _V1_EXPERIMENT_ID,
+        'strategy_name': '爆发捕捉 V1',
+        'version': 'v1',
+        'rule': _V1_EXPERIMENT_RULE,
+        'baseline': _experiment_stat(data),
+        'experiment': _experiment_stat(experiment),
+        'opportunity': {
+            'definition': '当天收益≥10% 或次日09:40前最高收益≥10%',
+            'total': sum(1 for row in data if (row.get('same_day_return_pct') or 0) >= 10 or (row.get('next_0940_max_return_pct') or 0) >= 10),
+            'captured': sum(1 for row in experiment if (row.get('same_day_return_pct') or 0) >= 10 or (row.get('next_0940_max_return_pct') or 0) >= 10),
+        },
+        'daily': daily,
+    }
+
+
+def _load_strategy_validation_result(date: str, buy_delay: int,
+                                     next_cutoff: str) -> list[dict] | None:
+    _ensure_strategy_validation_tables()
+    rows = mdb.executeSqlFetch(
+        '''
+        SELECT code, name, first_snapshot, buy_time, buy_actual_time, buy_price,
+               recommend_count, recommend_snapshots, ever_buyable, max_core_score,
+               modes, buy_statuses, mainlines, risk_tags, same_day_close,
+               same_day_return_pct, next_date, next_0940_price,
+               next_0940_return_pct, next_0940_max_return_pct, next_close,
+               next_close_return_pct, judged_mainline_hit, actual_mainline_hit
+        FROM cn_strategy_validation_result
+        WHERE strategy_name=%s AND trade_date=%s AND buy_delay=%s AND next_cutoff=%s
+        ORDER BY recommend_count DESC, max_core_score DESC NULLS LAST, code
+        ''',
+        ('mainline_relay', date, buy_delay, next_cutoff)
+    ) or []
+    if not rows:
+        return None
+    data = []
+    for r in rows:
+        data.append({
+            'date': date,
+            'code': str(r[0]).zfill(6),
+            'name': r[1] or str(r[0]).zfill(6),
+            'first_snapshot': r[2] or '',
+            'buy_time': r[3] or '',
+            'buy_actual_time': r[4] or '',
+            'buy_price': float(r[5]) if r[5] is not None else None,
+            'recommend_count': int(r[6] or 0),
+            'recommend_snapshots': r[7] or '',
+            'ever_buyable': bool(r[8]),
+            'max_core_score': float(r[9]) if r[9] is not None else None,
+            'modes': r[10] or '',
+            'buy_statuses': r[11] or '',
+            'mainlines': r[12] or '',
+            'risk_tags': r[13] or '',
+            'same_day_close': float(r[14]) if r[14] is not None else None,
+            'same_day_return_pct': float(r[15]) if r[15] is not None else None,
+            'next_date': str(r[16]) if r[16] else '',
+            'next_0940_price': float(r[17]) if r[17] is not None else None,
+            'next_0940_return_pct': float(r[18]) if r[18] is not None else None,
+            'next_0940_max_return_pct': float(r[19]) if r[19] is not None else None,
+            'next_close': float(r[20]) if r[20] is not None else None,
+            'next_close_return_pct': float(r[21]) if r[21] is not None else None,
+            'judged_mainline_hit': bool(r[22]),
+            'actual_mainline_hit': bool(r[23]),
+        })
+    return data
+
+
+def _save_strategy_validation_result(date: str, buy_delay: int, next_cutoff: str,
+                                     data: list[dict]) -> None:
+    _ensure_strategy_validation_tables()
+    values = []
+    for row in data:
+        values.append((
+            'mainline_relay',
+            date,
+            buy_delay,
+            next_cutoff,
+            row.get('code'),
+            row.get('name'),
+            row.get('first_snapshot'),
+            row.get('buy_time'),
+            row.get('buy_actual_time'),
+            row.get('buy_price'),
+            row.get('recommend_count') or 0,
+            row.get('recommend_snapshots') or '',
+            bool(row.get('ever_buyable')),
+            row.get('max_core_score'),
+            row.get('modes') or '',
+            row.get('buy_statuses') or '',
+            row.get('mainlines') or '',
+            row.get('risk_tags') or '',
+            row.get('same_day_close'),
+            row.get('same_day_return_pct'),
+            row.get('next_date') or None,
+            row.get('next_0940_price'),
+            row.get('next_0940_return_pct'),
+            row.get('next_0940_max_return_pct'),
+            row.get('next_close'),
+            row.get('next_close_return_pct'),
+            bool(row.get('judged_mainline_hit')),
+            bool(row.get('actual_mainline_hit')),
+        ))
+    if not values:
+        return
+    with mdb.get_connection() as conn:
+        with conn.cursor() as cur:
+            psycopg2.extras.execute_values(
+                cur,
+                '''
+                INSERT INTO cn_strategy_validation_result
+                    (strategy_name, trade_date, buy_delay, next_cutoff, code,
+                     name, first_snapshot, buy_time, buy_actual_time, buy_price,
+                     recommend_count, recommend_snapshots, ever_buyable,
+                     max_core_score, modes, buy_statuses, mainlines, risk_tags,
+                     same_day_close, same_day_return_pct, next_date,
+                     next_0940_price, next_0940_return_pct,
+                     next_0940_max_return_pct, next_close, next_close_return_pct,
+                     judged_mainline_hit, actual_mainline_hit,
+                     updated_at)
+                VALUES %s
+                ON CONFLICT (strategy_name, trade_date, buy_delay, next_cutoff, code)
+                DO UPDATE SET name=EXCLUDED.name,
+                              first_snapshot=EXCLUDED.first_snapshot,
+                              buy_time=EXCLUDED.buy_time,
+                              buy_actual_time=EXCLUDED.buy_actual_time,
+                              buy_price=EXCLUDED.buy_price,
+                              recommend_count=EXCLUDED.recommend_count,
+                              recommend_snapshots=EXCLUDED.recommend_snapshots,
+                              ever_buyable=EXCLUDED.ever_buyable,
+                              max_core_score=EXCLUDED.max_core_score,
+                              modes=EXCLUDED.modes,
+                              buy_statuses=EXCLUDED.buy_statuses,
+                              mainlines=EXCLUDED.mainlines,
+                              risk_tags=EXCLUDED.risk_tags,
+                              same_day_close=EXCLUDED.same_day_close,
+                              same_day_return_pct=EXCLUDED.same_day_return_pct,
+                              next_date=EXCLUDED.next_date,
+                              next_0940_price=EXCLUDED.next_0940_price,
+                              next_0940_return_pct=EXCLUDED.next_0940_return_pct,
+                              next_0940_max_return_pct=EXCLUDED.next_0940_max_return_pct,
+                              next_close=EXCLUDED.next_close,
+                              next_close_return_pct=EXCLUDED.next_close_return_pct,
+                              judged_mainline_hit=EXCLUDED.judged_mainline_hit,
+                              actual_mainline_hit=EXCLUDED.actual_mainline_hit,
+                              updated_at=CURRENT_TIMESTAMP
+                ''',
+                values,
+                template='(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)',
+                page_size=500,
+            )
+
+
+def _strategy_validation_rows(date: str, buy_delay: int = 2,
+                              next_cutoff: str = '09:40',
+                              refresh: bool = False) -> dict:
+    query_date = date or _latest_snapshot_trade_date()
+    next_date = _next_trade_date(query_date)
+    mainline_info = _strategy_validation_mainlines(query_date, refresh=refresh)
+    if not refresh:
+        cached_data = _load_strategy_validation_result(query_date, buy_delay, next_cutoff)
+        if cached_data is not None:
+            cached_next = cached_data[0].get('next_date') if cached_data else next_date
+            has_next_result = any(item.get('next_0940_return_pct') is not None for item in cached_data)
+            if next_date and (not cached_next or not has_next_result):
+                cached_data = None
+            else:
+                changed = _annotate_validation_mainline_hits(cached_data, mainline_info)
+                if changed:
+                    _save_strategy_validation_result(query_date, buy_delay, next_cutoff, cached_data)
+                limitup_info = _strategy_validation_limitups(
+                    query_date, buy_delay, next_cutoff, cached_data, mainline_info, refresh=refresh
+                )
+                return {
+                    'date': query_date,
+                    'next_date': cached_next or next_date,
+                    'buy_delay': buy_delay,
+                    'next_cutoff': next_cutoff,
+                    'mainline_info': mainline_info,
+                    'limitup_info': limitup_info,
+                    'summary': _strategy_validation_summary(cached_data),
+                    'data': cached_data,
+                    'cached': True,
+                }
+
+    rows = mdb.executeSqlFetch(
+        '''
+        SELECT
+            s.code,
+            COALESCE(MAX(NULLIF(s.payload_json->>'name', '')), s.code) AS name,
+            MIN(s.snapshot_time) AS first_snapshot,
+            COUNT(DISTINCT s.snapshot_time) AS recommend_count,
+            string_agg(DISTINCT s.snapshot_time, ',' ORDER BY s.snapshot_time) AS recommend_snapshots,
+            ROUND(MAX(s.core_score)::numeric, 1) AS max_core_score,
+            string_agg(DISTINCT NULLIF(s.trade_mode, ''), ' / ') AS modes,
+            string_agg(DISTINCT NULLIF(s.mainline_theme, ''), ' / ') AS mainlines,
+            string_agg(DISTINCT NULLIF(s.risk_tags, ''), ' / ') AS risk_tags
+        FROM cn_mainline_recommend_snapshot s
+        JOIN cn_mainline_recommend_snapshot_meta m
+          ON m.trade_date=s.trade_date
+         AND m.snapshot_time=s.snapshot_time
+         AND m.param_key=s.param_key
+         AND m.batch_id=s.batch_id
+        WHERE s.trade_date=%s
+          AND m.param_text LIKE %s
+        GROUP BY s.code
+        ORDER BY COUNT(DISTINCT s.snapshot_time) DESC, MAX(s.core_score) DESC NULLS LAST, s.code
+        ''',
+        (query_date, '%limit=300%')
+    ) or []
+
+    codes = [str(r[0]).zfill(6) for r in rows]
+    today_bars = _minute_rows_map(query_date, codes, '09:30', '15:00')
+    next_bars = _minute_rows_map(next_date, codes, '09:30', next_cutoff) if next_date else {}
+    today_close = _daily_close_map(query_date, codes)
+    next_close = _daily_close_map(next_date, codes) if next_date else {}
+
+    data = []
+    for r in rows:
+        code = str(r[0]).zfill(6)
+        first_snapshot = str(r[2])[:5]
+        buy_time = _minute_add(first_snapshot, buy_delay)
+        buy_bar = _first_bar_at_or_after(today_bars.get(code, []), buy_time)
+        buy_price = buy_bar.get('close') if buy_bar else None
+        buy_actual_time = buy_bar.get('time') if buy_bar else ''
+        same_close = today_close.get(code)
+        if same_close is None:
+            last_today = _last_bar_at_or_before(today_bars.get(code, []), '15:00')
+            same_close = last_today.get('close') if last_today else None
+
+        next_0940_bar = _last_bar_at_or_before(next_bars.get(code, []), next_cutoff)
+        next_0940_price = next_0940_bar.get('close') if next_0940_bar else None
+        next_0940_high = _max_high_at_or_before(next_bars.get(code, []), next_cutoff)
+
+        same_day_ret = _pct_return(same_close, buy_price)
+        next_0940_ret = _pct_return(next_0940_price, buy_price)
+        next_0940_max_ret = _pct_return(next_0940_high, buy_price)
+        next_close_ret = _pct_return(next_close.get(code), buy_price)
+
+        data.append({
+            'date': query_date,
+            'code': code,
+            'name': r[1] or code,
+            'first_snapshot': first_snapshot,
+            'buy_time': buy_time,
+            'buy_actual_time': buy_actual_time,
+            'buy_price': buy_price,
+            'recommend_count': int(r[3] or 0),
+            'recommend_snapshots': r[4] or '',
+            'max_core_score': float(r[5]) if r[5] is not None else None,
+            'modes': r[6] or '',
+            'mainlines': r[7] or '',
+            'risk_tags': r[8] or '',
+            'same_day_close': same_close,
+            'same_day_return_pct': same_day_ret,
+            'next_date': next_date,
+            'next_0940_price': next_0940_price,
+            'next_0940_return_pct': next_0940_ret,
+            'next_0940_max_return_pct': next_0940_max_ret,
+            'next_close': next_close.get(code),
+            'next_close_return_pct': next_close_ret,
+        })
+
+    _annotate_validation_mainline_hits(data, mainline_info)
+    _save_strategy_validation_result(query_date, buy_delay, next_cutoff, data)
+    limitup_info = _strategy_validation_limitups(
+        query_date, buy_delay, next_cutoff, data, mainline_info, refresh=refresh
+    )
+    return {
+        'date': query_date,
+        'next_date': next_date,
+        'buy_delay': buy_delay,
+        'next_cutoff': next_cutoff,
+        'mainline_info': mainline_info,
+        'limitup_info': limitup_info,
+        'summary': _strategy_validation_summary(data),
+        'data': data,
+        'cached': False,
+    }
+
+
+def _mainline_recommend_frequency(date: str, snapshot: str,
+                                  max_sector_rank: int, min_sector_strong: int,
+                                  min_ret: float, max_ret: float,
+                                  min_amt_ratio: float, theme: str,
+                                  min_amount: float, markets: list[str],
+                                  limit: int) -> dict[str, dict]:
+    """统计 09:35 到当前快照（最多09:50）每只股票进入页面候选池的次数。"""
+    snapshots = _mainline_recommend_snapshots(snapshot)
+    if not snapshots:
+        return {}
+
+    param_key, param_text = _mainline_recommend_param_key(
+        max_sector_rank, min_sector_strong, min_ret, max_ret,
+        min_amt_ratio, theme, min_amount, markets, limit
+    )
+    # Today's pre-market query may cache an empty result before the relevant
+    # minute bars exist. Version the cache by the available bar progress (up to
+    # this calculation window) so that result is never reused after data lands.
+    latest_time = _latest_minute_time(date) if date == _today() else ''
+    cache_progress = min(latest_time, snapshots[-1]) if latest_time else 'none'
+    cache_key = (
+        f'mainline_recommend_freq:v2:{date}:{snapshot}:{max_sector_rank}:'
+        f'{min_sector_strong}:{min_ret}:{max_ret}:{min_amt_ratio}:'
+        f'{min_amount}:{theme}:{param_key}:{limit}:bars={cache_progress}'
+    )
+    redis_client = None
+    try:
+        redis_client = get_redis()
+        raw = redis_client.get(cache_key)
+        if raw:
+            return json.loads(raw)
+    except Exception:
+        redis_client = None
+
+    market_fn = _market_code_fn(markets)
+    stats: dict[str, dict] = {}
+    # 当天开盘前可能有人选择了未来快照。那一刻没有分钟线，不能把空候选
+    # 当作真实结果长期留存；等数据到位后必须允许按该分钟重新计算。
+    for snap in snapshots:
+        try:
+            snapshot_rows = _load_mainline_recommend_snapshot(date, snap, param_key)
+            should_refresh_empty_today = (
+                date == _today()
+                and not snapshot_rows
+                and bool(latest_time)
+                and snap <= latest_time
+                and not _mainline_recommend_snapshot_confirmed(date, snap, param_key)
+            )
+            if snapshot_rows is None or should_refresh_empty_today:
+                raw_rows = _calc_mainline_core_rows_from_redis(
+                    date, snap, max_sector_rank, min_sector_strong,
+                    min_ret, max_ret, min_amt_ratio, theme, min_amount,
+                    include_all=True
+                )
+                if date == _today() and (not latest_time or snap > latest_time) and not raw_rows:
+                    # 未来分钟尚未产生，既不统计也不写入空快照。
+                    continue
+                market_env = _mainline_market_environment(raw_rows, markets, snap)
+                rows = raw_rows
+                if market_fn:
+                    rows = [row for row in rows if market_fn(str(row.get('code') or ''))]
+                passed = [
+                    row for row in rows
+                    if _passes_mainline_candidate(
+                        row, max_sector_rank, min_sector_strong,
+                        min_ret, max_ret, min_amt_ratio, min_amount
+                    )
+                ]
+                passed.sort(key=lambda r: (
+                    -float(r.get('core_score') or 0),
+                    int(r.get('sector_rank') or 999),
+                    -float(r.get('ret_vs_prevclose') or 0),
+                ))
+                if _mainline_list_mode(snap) == 'review':
+                    page_rows = [row for row in passed if _is_mainline_review_core(row)]
+                else:
+                    page_rows = passed
+                if market_env.get('trade_allowed') is False:
+                    page_rows = []
+                _save_mainline_market_env_snapshot(
+                    date, snap, markets, market_env,
+                    raw_count=len(raw_rows), candidate_count=len(page_rows), source='replay'
+                )
+
+                snapshot_rows = []
+                for index, row in enumerate(page_rows[:limit], start=1):
+                    item = row.copy()
+                    item['page_rank'] = index
+                    snapshot_rows.append(item)
+                _save_mainline_recommend_snapshot(
+                    date, snap, param_key, param_text, snapshot_rows,
+                    snapshot_confirmed=(date != _today() or bool(latest_time and snap <= latest_time)),
+                )
+
+            for row in snapshot_rows:
+                code = str(row.get('code') or '').zfill(6)
+                if not code:
+                    continue
+                item = stats.setdefault(code, {
+                    'recommend_count': 0,
+                    'recommend_snapshots': [],
+                    'recommend_window': f'{snapshots[0]}-{snapshots[-1]}',
+                    'first_snapshot': snap,
+                    'last_snapshot': snap,
+                    'first_ret_vs_prevclose': None,
+                    'last_ret_vs_prevclose': None,
+                    'first_amt_vs_prev': None,
+                    'last_amt_vs_prev': None,
+                    'ret_values': [],
+                })
+                item['recommend_count'] += 1
+                item['recommend_snapshots'].append(snap)
+                payload = row.get('payload_json') if isinstance(row.get('payload_json'), dict) else row
+                ret = _float_or_default(payload.get('ret_vs_prevclose'), None)
+                amount_ratio = _float_or_default(payload.get('amt_vs_prev'), None)
+                if item['first_ret_vs_prevclose'] is None:
+                    item['first_ret_vs_prevclose'] = ret
+                    item['first_amt_vs_prev'] = amount_ratio
+                item['last_snapshot'] = snap
+                item['last_ret_vs_prevclose'] = ret
+                item['last_amt_vs_prev'] = amount_ratio
+                if ret is not None:
+                    item['ret_values'].append(ret)
+        except Exception as e:
+            log.warning("主线推荐次数统计失败 %s %s: %s", date, snap, e)
+
+    for item in stats.values():
+        item['max_consecutive_count'] = _mainline_max_streak(item.get('recommend_snapshots') or [])
+        item['recommend_snapshots_text'] = ','.join(item.get('recommend_snapshots') or [])
+        first_ret = item.get('first_ret_vs_prevclose')
+        last_ret = item.get('last_ret_vs_prevclose')
+        first_amt = item.get('first_amt_vs_prev')
+        last_amt = item.get('last_amt_vs_prev')
+        item['ret_acceleration'] = (
+            round(last_ret - first_ret, 2)
+            if first_ret is not None and last_ret is not None else None
+        )
+        item['amount_acceleration'] = (
+            round(last_amt - first_amt, 2)
+            if first_amt is not None and last_amt is not None else None
+        )
+        if (item.get('ret_acceleration') or 0) >= 4:
+            item['burst_label'] = '加速爆发'
+        elif (item.get('ret_acceleration') or 0) >= 2 and (item.get('amount_acceleration') or 0) >= 0.3:
+            item['burst_label'] = '量价加速'
+        else:
+            item['burst_label'] = ''
+        ret_values = item.pop('ret_values', [])
+        changes = [
+            later - earlier
+            for earlier, later in zip(ret_values, ret_values[1:])
+        ]
+        positive_count = sum(1 for value in changes if value >= 0.05)
+        last_two = changes[-2:]
+        if (item.get('ret_acceleration') or 0) >= 2 and len(changes) >= 2 and \
+                positive_count / len(changes) >= 0.7 and sum(last_two) >= 0.2:
+            item['acceleration_persistence_label'] = '持续加速'
+        elif (item.get('ret_acceleration') or 0) >= 2 and sum(last_two) >= 0.5:
+            item['acceleration_persistence_label'] = '后段加速'
+        elif (item.get('ret_acceleration') or 0) >= 2:
+            item['acceleration_persistence_label'] = '断续加速'
+        else:
+            item['acceleration_persistence_label'] = '未加速'
+        item['acceleration_persistence_rate'] = round(
+            positive_count / len(changes) * 100, 0
+        ) if changes else None
+
+    try:
+        if redis_client:
+            redis_client.set(cache_key, json.dumps(stats, ensure_ascii=False), ex=60)
+    except Exception:
+        pass
+    return stats
+
+
+def _mainline_observation_profile(row: dict, frequency: dict) -> dict:
+    """把盘中过程拆成可观察标签，不参与候选池筛选。"""
+    ret = _float_or_default(row.get('ret_vs_prevclose'), 0)
+    theme_avg = _float_or_default(row.get('sector_top3_avg_ret'), 0)
+    relative_strength = round(ret - theme_avg, 2)
+    rank = int(row.get('sector_rank') or 999)
+    pullback = _float_or_default(row.get('pullback'), 0)
+    amount_ratio = _float_or_default(row.get('amt_vs_prev'), 0)
+    amount_acceleration = _float_or_default(frequency.get('amount_acceleration'), 0)
+    ret_acceleration = _float_or_default(frequency.get('ret_acceleration'), 0)
+
+    if pullback <= 0.8:
+        pullback_label = '高位横住'
+    elif pullback <= 2:
+        pullback_label = '回撤受控'
+    elif pullback <= 4:
+        pullback_label = '冲高回撤'
+    else:
+        pullback_label = '回撤偏大'
+
+    if amount_ratio >= 1.2 and amount_acceleration >= 0.3 and pullback <= 1.5:
+        volume_label = '放量承接'
+    elif amount_ratio >= 0.8 and pullback <= 2:
+        volume_label = '量能跟随'
+    elif amount_ratio < 0.8:
+        volume_label = '量能不足'
+    else:
+        volume_label = '量价待确认'
+
+    if rank == 1 and ret_acceleration >= 4:
+        execution_label = '爆发核心'
+    elif rank == 1 and ret_acceleration >= 2:
+        execution_label = '加速主线'
+    elif relative_strength >= 2:
+        execution_label = '强于主线'
+    else:
+        execution_label = '常规观察'
+
+    return {
+        'relative_theme_strength': relative_strength,
+        'relative_theme_label': '强于主线' if relative_strength >= 2 else (
+            '同步主线' if relative_strength >= -1 else '弱于主线'
+        ),
+        'acceleration_persistence_label': frequency.get('acceleration_persistence_label') or '未加速',
+        'acceleration_persistence_rate': frequency.get('acceleration_persistence_rate'),
+        'volume_follow_through_label': volume_label,
+        'pullback_label': pullback_label,
+        'execution_label': execution_label,
+    }
+
+
+def _intraday_burst_profile(row: dict, snapshot: str) -> dict:
+    """日内爆发捕捉V2：只使用所选快照及其之前已出现的候选过程。"""
+    ret = _float_or_default(row.get('ret_vs_prevclose'), 0)
+    rank = int(row.get('sector_rank') or 999)
+    repeated = int(row.get('recommend_count') or 0)
+    mode = str(row.get('trade_mode') or '')
+    core_score = _float_or_default(row.get('core_score'), 0)
+    amount_ratio = _float_or_default(row.get('amt_vs_prev'), 0)
+    sector_strong = int(row.get('sector_strong_count') or 0)
+    risks = row.get('risk_tags') or []
+    if not isinstance(risks, list):
+        risks = [part.strip() for part in str(risks).split('/') if part.strip()]
+
+    score = 0.0
+    factors: list[str] = []
+    gene_score = 0
+    if mode == '主线核心追强':
+        score += 4
+        factors.append('核心追强')
+        gene_score += 1
+    elif mode == '核心中位承接':
+        score += 2
+        factors.append('核心承接')
+    if rank <= 3:
+        score += 3
+        factors.append('主线前排')
+        gene_score += 1
+    elif rank <= 8:
+        score += 1
+    if repeated >= 5:
+        score += 3
+        factors.append(f'持续出现{repeated}次')
+        gene_score += 1
+    elif repeated >= 3:
+        score += 1
+        factors.append(f'出现{repeated}次')
+    if 5 <= ret < 12:
+        score += 3
+        factors.append('强势区间')
+        gene_score += 1
+    elif ret >= 12:
+        # 涨停样本中高涨幅票占比不低，保留爆发机会，但不因涨幅过高加满分。
+        score += 2
+        factors.append('高动量')
+        gene_score += 1
+    elif ret >= 2:
+        score += 1
+    if sector_strong >= 3:
+        score += 1
+        factors.append('板块共振')
+    if 0.7 <= amount_ratio <= 15:
+        score += 1
+        factors.append('量能可承接')
+    if core_score >= 180:
+        score += 1
+    penalties = []
+    if any(tag in risks for tag in ('回撤偏大', '冲高回落')):
+        score -= 2
+        penalties.append('回撤风险')
+    if '巨量分歧' in risks:
+        score -= 1
+        penalties.append('巨量分歧')
+
+    if gene_score >= 3:
+        gene_label = '涨停基因强'
+    elif gene_score >= 2:
+        gene_label = '涨停基因'
+    else:
+        gene_label = ''
+    if score >= 10:
+        signal_label = '爆发优先'
+    elif score >= 7:
+        signal_label = '重点爆发观察'
+    else:
+        signal_label = '常规候选'
+    return {
+        'intraday_burst_score': round(score, 1),
+        'limitup_gene_score': gene_score,
+        'limitup_gene_label': gene_label,
+        'intraday_burst_label': signal_label,
+        'intraday_burst_factors': factors,
+        'intraday_burst_penalties': penalties,
+        'intraday_buy_reference_time': _minute_add(snapshot, 2),
+    }
+
+
+def _save_intraday_burst_signals(date: str, snapshot: str, rows: list[dict],
+                                  market_status: str,
+                                  strategy_id: str = _INTRADAY_BURST_STRATEGY_ID,
+                                  version: str = _INTRADAY_BURST_VERSION) -> None:
+    """保存每日前5爆发候选，候选原始JSON仍由分钟快照表完整留存。"""
+    if not rows:
+        return
+    try:
+        _ensure_mainline_recommend_tables()
+        values = [
+            (
+                strategy_id,
+                version,
+                date,
+                snapshot,
+                str(row.get('code') or '').zfill(6),
+                index,
+                row.get('intraday_burst_score'),
+                int(row.get('limitup_gene_score') or 0),
+                market_status or '',
+                psycopg2.extras.Json(_json_safe({
+                    'name': row.get('name') or '',
+                    'trade_mode': row.get('trade_mode') or '',
+                    'mainline_theme': row.get('mainline_theme') or row.get('trade_theme') or '',
+                    'factors': row.get('intraday_burst_factors') or [],
+                    'penalties': row.get('intraday_burst_penalties') or [],
+                    'recommend_count': row.get('recommend_count') or 0,
+                    'ret_vs_prevclose': row.get('ret_vs_prevclose'),
+                })),
+            )
+            for index, row in enumerate(rows, start=1)
+            if row.get('code')
+        ]
+        if not values:
+            return
+        with mdb.get_connection() as conn:
+            with conn.cursor() as cur:
+                psycopg2.extras.execute_values(
+                    cur,
+                    '''
+                    INSERT INTO cn_intraday_burst_signal
+                        (strategy_id, version, trade_date, snapshot_time, code,
+                         page_rank, burst_score, limitup_gene_score, market_status,
+                         factor_json, updated_at)
+                    VALUES %s
+                    ON CONFLICT (strategy_id, version, trade_date, snapshot_time, code)
+                    DO UPDATE SET page_rank=EXCLUDED.page_rank,
+                                  burst_score=EXCLUDED.burst_score,
+                                  limitup_gene_score=EXCLUDED.limitup_gene_score,
+                                  market_status=EXCLUDED.market_status,
+                                  factor_json=EXCLUDED.factor_json,
+                                  updated_at=CURRENT_TIMESTAMP
+                    ''',
+                    values,
+                    template='(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,CURRENT_TIMESTAMP)',
+                )
+    except Exception as e:
+        log.warning('保存日内爆发候选失败 %s %s: %s', date, snapshot, e)
 
 
 def _is_mainline_review_core(row: dict) -> bool:
@@ -792,7 +2775,6 @@ def _annotate_mainline_items(items: list[dict], date: str, snapshot: str,
             item['signal_type'] = MAINLINE_LATE_RUSH_MODE
         item['mode_group'] = _mainline_mode_group(item['trade_mode'])
         item['core_score'] = _mainline_core_score(item)
-        item['observe_label'] = _mainline_observe_label(item)
         item['risk_tags'] = _mainline_risk_tags(item)
     return items
 
@@ -833,28 +2815,51 @@ def _mainline_risk_tags(row: dict) -> list[str]:
     return risks[:5]
 
 
-def _mainline_observe_label(row: dict) -> str:
-    mode = row.get('trade_mode') or _mainline_trade_mode(row)
+def _mainline_strict_overnight_profile(row: dict, snapshot: str) -> dict:
+    """6/7月回测校准出的隔夜候选收窄规则，用作额外标记/筛选。"""
     ret = float(row.get('ret_vs_prevclose') or 0)
-    pullback = float(row.get('pullback') or 0)
     pos = float(row.get('pos_in_range') or 0)
-    eff = float(row.get('push_efficiency') or 0)
-    price = float(row.get('buy_price') or 0)
-    if mode == MAINLINE_LATE_RUSH_MODE or row.get('late_new_signal') or row.get('near_30d_high_rush'):
-        return '等回踩'
-    if mode == '主线核心追强' and pullback <= 2.5 and pos >= 75:
-        return '可追强'
-    if mode == '核心中位承接' and pullback <= 4 and pos >= 35:
-        return '重点观察'
-    if mode == '主线低位突破':
-        return '等确认'
-    if mode == '修复反包观察':
-        return '只观察'
-    if 1.5 <= ret <= 8.5 and pullback <= 2.0 and pos >= 75 and eff >= 0.5 and price <= 300:
-        return '可买'
-    if ret > 12 or pullback > 4 or price > 300:
-        return '偏追高'
-    return '只观察'
+    pullback = float(row.get('pullback') or 0)
+    amt_ratio = float(row.get('amt_vs_prev') or 0)
+    tags = row.get('risk_tags') or []
+    if not isinstance(tags, list):
+        tags = [str(tags)] if tags else []
+
+    hard_tags = {
+        '巨量分歧',
+        '分支非核心',
+        '涨幅偏高',
+        '09:45后新出现',
+        '临近30日高急拉',
+        '冲高回落',
+        '回撤偏大',
+    }
+    hard_hits = [tag for tag in tags if tag in hard_tags]
+    blocks: list[str] = []
+    if snapshot != '09:35':
+        blocks.append('仅09:35早识别')
+    if hard_hits:
+        blocks.append('硬风险:' + '/'.join(hard_hits[:3]))
+    if pullback > 2.5:
+        blocks.append('回落超过2.5%')
+
+    no_risk = len(tags) == 0
+    patterns: list[str] = []
+    if 5 <= ret <= 8 and pos >= 75 and no_risk:
+        patterns.append('5-8%强势无风险')
+    if 0.7 <= amt_ratio <= 2.5 and 2 <= ret <= 8 and pos >= 90:
+        patterns.append('适量高位承接')
+    if amt_ratio <= 2.5 and pos >= 90 and no_risk:
+        patterns.append('高位无风险')
+    if amt_ratio <= 1.5 and 2 <= ret <= 8 and no_risk:
+        patterns.append('温和量能无风险')
+
+    ok = not blocks and bool(patterns)
+    return {
+        'ok': ok,
+        'pattern': ' / '.join(patterns),
+        'reason': '；'.join(patterns if ok else blocks),
+    }
 
 
 def _mainline_core_score(row: dict) -> float:
@@ -1184,7 +3189,6 @@ def _calc_mainline_core_rows_from_redis(date: str, snapshot: str,
         item['trade_mode'] = _mainline_trade_mode(item)
         item['mode_group'] = _mainline_mode_group(item['trade_mode'])
         item['core_score'] = _mainline_core_score(item)
-        item['observe_label'] = _mainline_observe_label(item)
         item['risk_tags'] = _mainline_risk_tags(item)
         item['signal_type'] = item['trade_mode']
         items.append(item)
@@ -1203,10 +3207,8 @@ def _calc_mainline_core_rows_from_redis(date: str, snapshot: str,
         ):
             out.append(item)
 
-    label_order = {'可追强': 0, '重点观察': 1, '等回踩': 2, '等确认': 3, '只观察': 4, '偏追高': 5}
     out.sort(key=lambda r: (
         -float(r.get('core_score') or 0),
-        label_order.get(r.get('observe_label'), 9),
         int(r.get('sector_rank') or 999),
         -int(r.get('sector_strong_count') or 0),
         -float(r.get('ret_vs_prevclose') or 0),
@@ -1390,7 +3392,6 @@ def _stock_signal_detail_for_code(code: str, date: str, snapshot: str) -> dict:
             item['trade_mode'] = _mainline_trade_mode(item)
             item['mode_group'] = _mainline_mode_group(item['trade_mode'])
             item['core_score'] = _mainline_core_score(item)
-            item['observe_label'] = _mainline_observe_label(item)
             item['risk_tags'] = _mainline_risk_tags(item)
     else:
         item = {
@@ -1404,6 +3405,10 @@ def _stock_signal_detail_for_code(code: str, date: str, snapshot: str) -> dict:
     item['code'] = code
     item['name'] = names.get(code, code)
     item['prev_date'] = prev_d
+    overnight = _mainline_strict_overnight_profile(item, snapshot)
+    item['overnight_strict'] = overnight['ok']
+    item['overnight_pattern'] = overnight['pattern']
+    item['overnight_reason'] = overnight['reason']
     item['today_bars'] = _minute_bars(date, code)
     item['prev_bars'] = _minute_bars(prev_d, code) if prev_d else []
     return item
@@ -1804,6 +3809,7 @@ class ApiMainlineCoreHandler(webBase.BaseHandler, ABC):
         include_bars = self.get_argument('include_bars', '0') == '1'
         force_refresh = self.get_argument('refresh', '0') == '1'
         high_prob_only = self.get_argument('high_prob_only', '0') == '1'  # 新增：只看高概率
+        strict_overnight = False
 
         self.set_header('Content-Type', 'application/json; charset=utf-8')
         try:
@@ -1819,7 +3825,8 @@ class ApiMainlineCoreHandler(webBase.BaseHandler, ABC):
             cache_key = _mainline_cache_key(
                 date, snapshot, max_sector_rank, min_sector_strong,
                 min_ret, max_ret, min_amt_ratio, min_amount,
-                theme, limit, include_bars, market_key
+                theme, limit, include_bars, market_key,
+                high_prob_only, strict_overnight
             )
             redis_client = get_redis()
             cached = None if force_refresh else redis_client.get(cache_key)
@@ -1827,35 +3834,77 @@ class ApiMainlineCoreHandler(webBase.BaseHandler, ABC):
                 self.write(cached)
                 return
 
-            raw_all_rows = _calc_mainline_core_rows_from_redis(
-                date, snapshot, max_sector_rank, min_sector_strong,
-                min_ret, max_ret, min_amt_ratio, theme, min_amount,
-                include_all=True
+            snapshot_param_key, snapshot_param_text = _mainline_recommend_param_key(
+                max_sector_rank, min_sector_strong, min_ret, max_ret,
+                min_amt_ratio, theme, min_amount, markets, limit
             )
-            market_env = _mainline_market_environment(raw_all_rows, markets, snapshot)
+            latest_time = _latest_minute_time(date)
+            stored_snapshot = _load_mainline_recommend_snapshot(
+                date, snapshot, snapshot_param_key
+            )
+            stored_env = _load_mainline_market_env_snapshot(date, snapshot, markets)
+            is_live_latest_minute = (
+                date == _today()
+                and '09:30' <= _current_time() <= '15:01'
+                and bool(latest_time and snapshot >= latest_time)
+            )
+            use_saved_snapshot = (
+                not is_live_latest_minute
+                and stored_snapshot is not None
+                and _mainline_recommend_snapshot_confirmed(date, snapshot, snapshot_param_key)
+                and stored_env is not None
+            )
 
-            all_rows = raw_all_rows
-            market_fn = _market_code_fn(markets)
-            if market_fn:
-                all_rows = [row for row in all_rows if market_fn(str(row.get('code') or ''))]
-            passed_candidates = [
-                row for row in all_rows
-                if _passes_mainline_candidate(
-                    row, max_sector_rank, min_sector_strong,
-                    min_ret, max_ret, min_amt_ratio, min_amount
-                )
-            ]
-            passed_candidates.sort(key=lambda r: (
-                -float(r.get('core_score') or 0),
-                int(r.get('sector_rank') or 999),
-                -float(r.get('ret_vs_prevclose') or 0),
-            ))
-            if list_mode == 'review':
-                candidates = [row for row in passed_candidates if _is_mainline_review_core(row)]
-                watch_candidates = [row for row in passed_candidates if _is_mainline_review_watch(row)]
-            else:
-                candidates = passed_candidates
+            if use_saved_snapshot:
+                # 已完成的任意分钟直接恢复当时的候选，不重扫全市场 Redis。
+                candidates = _mainline_snapshot_payload_rows(stored_snapshot)
                 watch_candidates = []
+                all_rows = candidates
+                market_env = stored_env
+            else:
+                raw_all_rows = _calc_mainline_core_rows_from_redis(
+                    date, snapshot, max_sector_rank, min_sector_strong,
+                    min_ret, max_ret, min_amt_ratio, theme, min_amount,
+                    include_all=True
+                )
+                market_env = _mainline_market_environment(raw_all_rows, markets, snapshot)
+
+                all_rows = raw_all_rows
+                market_fn = _market_code_fn(markets)
+                if market_fn:
+                    all_rows = [row for row in all_rows if market_fn(str(row.get('code') or ''))]
+                passed_candidates = [
+                    row for row in all_rows
+                    if _passes_mainline_candidate(
+                        row, max_sector_rank, min_sector_strong,
+                        min_ret, max_ret, min_amt_ratio, min_amount
+                    )
+                ]
+                passed_candidates.sort(key=lambda r: (
+                    -float(r.get('core_score') or 0),
+                    int(r.get('sector_rank') or 999),
+                    -float(r.get('ret_vs_prevclose') or 0),
+                ))
+                if list_mode == 'review':
+                    candidates = [row for row in passed_candidates if _is_mainline_review_core(row)]
+                    watch_candidates = [row for row in passed_candidates if _is_mainline_review_watch(row)]
+                else:
+                    candidates = passed_candidates
+                    watch_candidates = []
+
+                _save_mainline_market_env_snapshot(
+                    date, snapshot, markets, market_env,
+                    raw_count=len(raw_all_rows), candidate_count=len(candidates), source='live'
+                )
+                snapshot_rows_for_store = [] if market_env.get('trade_allowed') is False else candidates[:limit]
+                store_rows = []
+                for index, row in enumerate(snapshot_rows_for_store, start=1):
+                    item = row.copy()
+                    item['page_rank'] = index
+                    store_rows.append(item)
+                _save_mainline_recommend_snapshot(
+                    date, snapshot, snapshot_param_key, snapshot_param_text, store_rows
+                )
 
             name_codes = []
             for row in candidates[:limit * 2] + watch_candidates[:limit * 2]:
@@ -1865,6 +3914,11 @@ class ApiMainlineCoreHandler(webBase.BaseHandler, ABC):
             names = _stock_names(name_codes)
             latest_prices = _latest_minute_prices(date, sorted(set(name_codes)))
             daily_metrics = _stock_daily_metrics(name_codes, date)
+            recommend_frequency = _mainline_recommend_frequency(
+                date, snapshot, max_sector_rank, min_sector_strong,
+                min_ret, max_ret, min_amt_ratio, theme, min_amount,
+                markets, limit
+            )
 
             def compact_item(row: dict) -> dict:
                 prev_d = str(row.get('prev_d') or '')
@@ -1883,6 +3937,18 @@ class ApiMainlineCoreHandler(webBase.BaseHandler, ABC):
                     (current_price / prev_close - 1) * 100
                     if current_price > 0 and prev_close > 0 else None
                 )
+                freq = recommend_frequency.get(code) or {}
+                item['recommend_count'] = int(freq.get('recommend_count') or 0)
+                item['max_consecutive_count'] = int(freq.get('max_consecutive_count') or 0)
+                item['recommend_window'] = freq.get('recommend_window') or ''
+                item['recommend_snapshots'] = freq.get('recommend_snapshots_text') or ''
+                item['first_candidate_snapshot'] = freq.get('first_snapshot') or ''
+                item['first_candidate_ret_vs_prevclose'] = freq.get('first_ret_vs_prevclose')
+                item['ret_acceleration'] = freq.get('ret_acceleration')
+                item['amount_acceleration'] = freq.get('amount_acceleration')
+                item['burst_label'] = freq.get('burst_label') or ''
+                item.update(_mainline_observation_profile(item, freq))
+                item.update(_intraday_burst_profile(item, snapshot))
 
                 # 添加全天量比、换手率和概率标签
                 metrics = daily_metrics.get(code, {})
@@ -1896,13 +3962,42 @@ class ApiMainlineCoreHandler(webBase.BaseHandler, ABC):
                 item['prob_color'] = prob['color']
                 item['prob_icon'] = prob['icon']
                 item['prob_tip'] = prob['tip']
-
                 if include_bars:
                     item['today_bars'] = _minute_bars(date, code)
                     item['prev_bars'] = _minute_bars(prev_d, code) if prev_d else []
-                return item
+                # 完整候选快照已在入库阶段保存；页面只需要轻量字段，避免把
+                # 大量回放原始值重复传给浏览器，拖慢主线分组和个股表渲染。
+                table_fields = (
+                    'date', 'code', 'name', 'prev_d', 'prev_date',
+                    'trade_theme', 'best_sector', 'mainline_theme', 'broad_theme',
+                    'sector_rank', 'sector_strong_count', 'sector_top3_avg_ret',
+                    'trade_mode', 'signal_type', 'risk_tags', 'tags', 'ret_vs_prevclose',
+                    'buy_price', 'pos_in_range', 'pullback', 'distance_to_30d_high',
+                    'day_max_up_pct', 'day_close_return_pct', 'next_open_return_pct',
+                    'next_1000_return_pct', 'next_1000_max_up_pct',
+                    'amt_vs_prev', 'push_efficiency',
+                    'current_price', 'current_time', 'current_change_pct',
+                    'recommend_count', 'max_consecutive_count', 'recommend_window',
+                    'recommend_snapshots', 'first_candidate_snapshot',
+                    'first_candidate_ret_vs_prevclose', 'ret_acceleration',
+                    'amount_acceleration', 'burst_label',
+                    'acceleration_persistence_label', 'acceleration_persistence_rate',
+                    'volume_follow_through_label', 'execution_label',
+                    'intraday_burst_score', 'intraday_burst_label',
+                    'limitup_gene_score', 'limitup_gene_label',
+                    'intraday_burst_factors', 'intraday_burst_penalties',
+                    'intraday_buy_reference_time',
+                    'daily_volume_ratio', 'prob_label', 'prob_color', 'prob_icon',
+                    'prob_tip', 'page_rank',
+                )
+                compact = {field: item.get(field) for field in table_fields if field in item}
+                if include_bars:
+                    compact['today_bars'] = item.get('today_bars') or []
+                    compact['prev_bars'] = item.get('prev_bars') or []
+                return compact
 
-            def build_data(source: list[dict], row_limit: int) -> list[dict]:
+            def build_data(source: list[dict], row_limit: int,
+                           respect_high_probability: bool = True) -> list[dict]:
                 out = []
                 for row in source:
                     code = row['code']
@@ -1911,8 +4006,9 @@ class ApiMainlineCoreHandler(webBase.BaseHandler, ABC):
                         continue
                     item = compact_item(row)
                     # 如果开启 high_prob_only，只保留高概率的票
-                    if high_prob_only and item.get('prob_label') != 'high':
+                    if respect_high_probability and high_prob_only and item.get('prob_label') != 'high':
                         continue
+                    item['page_rank'] = len(out) + 1
                     out.append(item)
                     if len(out) >= row_limit:
                         break
@@ -1920,6 +4016,7 @@ class ApiMainlineCoreHandler(webBase.BaseHandler, ABC):
 
             data = build_data(candidates, limit)
             watch_data = build_data(watch_candidates, limit)
+            burst_source = build_data(candidates, limit, respect_high_probability=False)
             themes = _build_mainline_theme_groups(all_rows, data)
             watch_themes = _build_mainline_theme_groups(all_rows, watch_data)
             summary = _build_mainline_summary(date, snapshot, all_rows, themes)
@@ -1928,6 +4025,7 @@ class ApiMainlineCoreHandler(webBase.BaseHandler, ABC):
                 watch_data = []
                 themes = []
                 watch_themes = []
+                burst_source = []
                 summary = {
                     'status': market_env.get('status') or '弱市退潮',
                     'sentence': f"{snapshot}：{market_env.get('action') or '空仓/轻仓观察'}。{market_env.get('reason') or ''}",
@@ -1936,6 +4034,67 @@ class ApiMainlineCoreHandler(webBase.BaseHandler, ABC):
                     'top_broad': [],
                     'top_themes': [],
                 }
+
+            intraday_burst = sorted(
+                burst_source,
+                key=lambda item: (
+                    -float(item.get('intraday_burst_score') or 0),
+                    -int(item.get('limitup_gene_score') or 0),
+                    -int(item.get('recommend_count') or 0),
+                    -float(item.get('ret_vs_prevclose') or 0),
+                ),
+            )
+            if market_env.get('trade_allowed') == 'guarded':
+                intraday_burst = intraday_burst[:3]
+            else:
+                intraday_burst = intraday_burst[:5]
+            _save_intraday_burst_signals(
+                date, snapshot, intraday_burst, market_env.get('status') or ''
+            )
+
+            # V3 继承 V2 的全部评分，只剔除已涨到 9% 及以上、实盘不宜再追的票。
+            intraday_burst_v3 = sorted(
+                (
+                    item for item in burst_source
+                    if _float_or_default(item.get('ret_vs_prevclose'), 0) < 9
+                ),
+                key=lambda item: (
+                    -float(item.get('intraday_burst_score') or 0),
+                    -int(item.get('limitup_gene_score') or 0),
+                    -int(item.get('recommend_count') or 0),
+                    -float(item.get('ret_vs_prevclose') or 0),
+                ),
+            )
+            if market_env.get('trade_allowed') == 'guarded':
+                intraday_burst_v3 = intraday_burst_v3[:3]
+            else:
+                intraday_burst_v3 = intraday_burst_v3[:5]
+            _save_intraday_burst_signals(
+                date, snapshot, intraday_burst_v3, market_env.get('status') or '',
+                strategy_id=_INTRADAY_BURST_V3_STRATEGY_ID,
+                version=_INTRADAY_BURST_V3_VERSION,
+            )
+
+            def compact_theme_groups(groups: list[dict]) -> list[dict]:
+                stock_fields = (
+                    'code', 'name', 'mainline_theme', 'trade_theme', 'best_sector',
+                    'trade_mode', 'risk_tags', 'amt_vs_prev', 'ret_acceleration',
+                    'amount_acceleration', 'burst_label',
+                    'acceleration_persistence_label', 'volume_follow_through_label',
+                    'execution_label',
+                )
+                result = []
+                for group in groups:
+                    item = {key: value for key, value in group.items() if key != 'stocks'}
+                    item['stocks'] = [
+                        {key: stock.get(key) for key in stock_fields if key in stock}
+                        for stock in group.get('stocks') or []
+                    ]
+                    result.append(item)
+                return result
+
+            response_themes = compact_theme_groups(themes)
+            response_watch_themes = compact_theme_groups(watch_themes)
 
             payload = json.dumps({
                 'ok': True,
@@ -1951,6 +4110,19 @@ class ApiMainlineCoreHandler(webBase.BaseHandler, ABC):
                 'watch_theme_count': len(watch_themes),
                 'summary': summary,
                 'market_env': market_env,
+                'intraday_burst': {
+                    'strategy_id': _INTRADAY_BURST_STRATEGY_ID,
+                    'version': _INTRADAY_BURST_VERSION,
+                    'buy_reference_time': _minute_add(snapshot, 2),
+                    'data': intraday_burst,
+                },
+                'intraday_burst_v3': {
+                    'strategy_id': _INTRADAY_BURST_V3_STRATEGY_ID,
+                    'version': _INTRADAY_BURST_V3_VERSION,
+                    'buy_reference_time': _minute_add(snapshot, 2),
+                    'max_ret_vs_prevclose': 9,
+                    'data': intraday_burst_v3,
+                },
                 'params': {
                     'max_sector_rank': max_sector_rank,
                     'min_sector_strong': min_sector_strong,
@@ -1964,16 +4136,69 @@ class ApiMainlineCoreHandler(webBase.BaseHandler, ABC):
                     'list_mode': list_mode,
                     'review_cutoff': MAINLINE_GUARD_CUTOFF,
                     'high_prob_only': high_prob_only,
+                    'strict_overnight': strict_overnight,
                 },
                 'data': data,
-                'themes': themes,
+                'themes': response_themes,
                 'watch_data': watch_data,
-                'watch_themes': watch_themes,
+                'watch_themes': response_watch_themes,
             }, ensure_ascii=False, default=str)
-            redis_client.set(cache_key, payload, ex=30)
+            latest_time = _latest_minute_time(date)
+            early_snapshot_settled = (
+                date != _today()
+                or (snapshot <= MAINLINE_RECOMMEND_END and bool(latest_time and snapshot <= latest_time))
+            )
+            # 09:50 前的回放快照在分钟线落地后不会再变化，长缓存避免反复重算。
+            redis_client.set(cache_key, payload, ex=600 if early_snapshot_settled else 30)
             self.write(payload)
         except Exception as e:
             log.error(f"mainline_core error: {e}", exc_info=True)
+            self.set_status(500)
+            self.write(json.dumps({'ok': False, 'error': str(e)}, ensure_ascii=False))
+
+
+# ── /api/strategy_validation ─────────────────────────────────────────────
+class ApiStrategyValidationHandler(webBase.BaseHandler, ABC):
+    """
+    GET /api/strategy_validation
+    按天复盘超短主线接力候选池：第一次出现后延迟买入，统计当天/次日收益。
+    """
+    @gen.coroutine
+    def get(self):
+        date = self.get_argument('date', '') or _latest_snapshot_trade_date()
+        try:
+            buy_delay = int(self.get_argument('buy_delay', '2') or 2)
+        except Exception:
+            buy_delay = 2
+        next_cutoff = self.get_argument('next_cutoff', '09:40') or '09:40'
+        force_refresh = self.get_argument('refresh', '0') == '1'
+
+        self.set_header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            result = _strategy_validation_rows(date, buy_delay, next_cutoff, refresh=force_refresh)
+            self.write(json.dumps({'ok': True, **result}, ensure_ascii=False, default=str))
+        except Exception as e:
+            log.error(f"strategy_validation error: {e}", exc_info=True)
+            self.set_status(500)
+            self.write(json.dumps({'ok': False, 'error': str(e)}, ensure_ascii=False))
+
+
+# ── /api/strategy_validation_experiment ──────────────────────────────────
+class ApiStrategyValidationExperimentHandler(webBase.BaseHandler, ABC):
+    """GET /api/strategy_validation_experiment：读取已入库回放，比较V1实验组。"""
+    @gen.coroutine
+    def get(self):
+        try:
+            buy_delay = int(self.get_argument('buy_delay', '2') or 2)
+        except Exception:
+            buy_delay = 2
+        next_cutoff = self.get_argument('next_cutoff', '09:40') or '09:40'
+        self.set_header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            result = _strategy_validation_experiment(buy_delay, next_cutoff)
+            self.write(json.dumps({'ok': True, **result}, ensure_ascii=False, default=str))
+        except Exception as e:
+            log.error(f"strategy_validation_experiment error: {e}", exc_info=True)
             self.set_status(500)
             self.write(json.dumps({'ok': False, 'error': str(e)}, ensure_ascii=False))
 
@@ -2537,7 +4762,8 @@ class ApiMinuteBarsHandler(webBase.BaseHandler, ABC):
         date = self.get_argument('date', _today())
         self.set_header('Content-Type', 'application/json; charset=utf-8')
         try:
-            bars = get_day_bars(date, code)
+            # 历史回放时 Redis 通常已过期，需回退到 PG 的分钟线留存。
+            bars = _minute_bars(date, code)
             self.write(json.dumps({'ok': True, 'code': code, 'date': date, 'bars': bars},
                                   ensure_ascii=False, default=str))
         except Exception as e:
@@ -3070,3 +5296,181 @@ def _get_sector_scores_from_cache(date: str) -> dict:
     except Exception as e:
         log.warning(f"_get_sector_scores_from_cache: {e}")
         return {}
+
+# ── /api/daily_recommend ─────────────────────────────────────────────────
+class ApiDailyRecommendHandler(webBase.BaseHandler, ABC):
+    """GET /api/daily_recommend
+    返回今日推荐 Top 5，融合板块排名(35%)+量能爆发(30%)+位置安全(20%)+持续性(15%)。
+    排除涨幅 >8% 的票；市场环境退潮时返回空列表。
+    """
+    def get(self):
+        date     = self.get_argument('date',     '') or _latest_data_date()
+        snapshot = self.get_argument('snapshot', '') or _default_mainline_snapshot(date)
+        markets  = [m.strip() for m in self.get_argument('market', 'all').split(',') if m.strip()]
+
+        self.set_header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            max_sector_rank   = 8
+            min_sector_strong = 0
+            min_ret = -3.0;   max_ret = 35.0
+            min_amt_ratio = 0.3; min_amount = 5_000_000
+
+            raw_rows = _calc_mainline_core_rows_from_redis(
+                date, snapshot, max_sector_rank, min_sector_strong,
+                min_ret, max_ret, min_amt_ratio, 'auto', min_amount,
+                include_all=True
+            )
+            market_env = _mainline_market_environment(raw_rows, markets, snapshot)
+
+            if market_env.get('trade_allowed') is False:
+                self.write(json.dumps({
+                    'ok': True, 'date': date, 'snapshot': snapshot,
+                    'market_env': market_env, 'recommendations': [],
+                    'reason': '市场环境退潮，今日不出推荐',
+                }, ensure_ascii=False))
+                return
+
+            market_fn = _market_code_fn(markets)
+            candidates = [
+                r for r in raw_rows
+                if _passes_mainline_candidate(r, max_sector_rank, min_sector_strong,
+                                              min_ret, max_ret, min_amt_ratio, min_amount)
+            ]
+            if market_fn:
+                candidates = [r for r in candidates if market_fn(str(r.get('code') or ''))]
+            candidates.sort(key=lambda r: -float(r.get('core_score') or 0))
+
+            top_n = candidates[:50]
+            codes = [r['code'] for r in top_n]
+            yest_date = _prev_trade_date(date)
+            today_bars_map = _load_minute_bars_for_codes(date, codes)
+            yest_bars_map  = _load_minute_bars_for_codes(yest_date, codes)
+
+            names         = _stock_names(codes)
+            latest_prices = _latest_minute_prices(date, codes)
+            daily_metrics = _stock_daily_metrics(codes, date)
+
+            scored = []
+            for row in top_n:
+                code = row['code']
+                ret  = float(row.get('ret_vs_prevclose') or 0)
+                if ret > 8:
+                    continue
+
+                sector_rank   = int(row.get('sector_rank') or 999)
+                sector_score  = max(0, 35 - sector_rank * 2)
+
+                amt_ratio     = float(row.get('amt_vs_prev') or 0)
+                vol_score     = min(30, amt_ratio * 12)
+
+                dist_high     = float(row.get('distance_to_30d_high') or 0)
+                pos_score     = min(20, max(0, dist_high * 0.8))
+
+                today_bars    = _bars_until(today_bars_map.get(code, []), snapshot)
+                yest_bars     = yest_bars_map.get(code, [])
+                cont_score    = _recommend_continuity_score(today_bars, yest_bars, snapshot, row)
+
+                total = (sector_score * 0.35 +
+                         vol_score   * 0.30 +
+                         pos_score   * 0.20 +
+                         cont_score  * 0.15)
+
+                name   = names.get(code, code)
+                curr   = latest_prices.get(code) or {}
+                prev_c = float(row.get('prev_close') or 0)
+                curr_p = float(curr.get('current_price') or 0)
+                change_pct = ((curr_p / prev_c - 1) * 100) if prev_c > 0 and curr_p > 0 else ret
+                dm = daily_metrics.get(code) or {}
+
+                buy_strength = _calc_buy_strength(today_bars)
+                up_arrow = '↑' if buy_strength >= 0.58 else ('→' if buy_strength >= 0.48 else '↓')
+
+                scored.append({
+                    'code':             code,
+                    'name':             name,
+                    'recommend_score':  round(total, 1),
+                    'prev_d':           row.get('prev_d', ''),
+                    'ret_vs_prevclose': round(ret, 2),
+                    'current_change':   round(change_pct, 2),
+                    'current_price':    curr_p,
+                    'sector_rank':      sector_rank,
+                    'trade_theme':      row.get('trade_theme') or row.get('best_sector', ''),
+                    'amt_vs_prev':      round(amt_ratio, 2),
+                    'buy_strength':     round(buy_strength, 3),
+                    'buy_trend':        up_arrow,
+                    'distance_30d':     round(dist_high, 1),
+                    'pos_in_range':     round(float(row.get('pos_in_range') or 0), 1),
+                    'turnover':         round(float(dm.get('turnover') or 0), 2),
+                    'continuity_check': cont_score >= 8,
+                    'sector_score':     round(sector_score, 1),
+                    'vol_score':        round(vol_score, 1),
+                    'pos_score':        round(pos_score, 1),
+                    'cont_score':       round(cont_score, 1),
+                    'risk_tags':        row.get('risk_tags', ''),
+                })
+
+            scored.sort(key=lambda x: -x['recommend_score'])
+            result = scored[:5]
+
+            self.write(json.dumps({
+                'ok': True,
+                'date': date,
+                'snapshot': snapshot,
+                'market_env': market_env,
+                'list_mode': _mainline_list_mode(snapshot),
+                'candidate_count': len(candidates),
+                'recommendations': result,
+            }, ensure_ascii=False))
+
+        except Exception as e:
+            log.exception('daily_recommend error')
+            self.write(json.dumps({'ok': False, 'error': str(e)}, ensure_ascii=False))
+
+
+def _calc_buy_strength(today_bars: list[dict]) -> float:
+    if not today_bars:
+        return 0.0
+    total_vol = sum(b.get('volume', 0) for b in today_bars)
+    if total_vol <= 0:
+        return 0.0
+    up_vol = 0.0
+    for i, b in enumerate(today_bars):
+        prev_close = today_bars[i-1]['close'] if i > 0 else b.get('pre_close', b['close'])
+        if b.get('close', 0) > prev_close:
+            up_vol += b.get('volume', 0)
+    return up_vol / total_vol
+
+
+def _recommend_continuity_score(today_bars: list[dict], yest_bars: list[dict],
+                                snapshot: str, row: dict) -> float:
+    score = 0.0
+
+    strong = int(row.get('sector_strong_count') or 0)
+    if strong >= 5:       score += 5
+    elif strong >= 3:     score += 3
+    elif strong >= 2:     score += 1
+
+    today_S = _calc_buy_strength(today_bars)
+    yest_bars_same = _bars_until(yest_bars, snapshot)
+    yest_S = _calc_buy_strength(yest_bars_same)
+    if yest_S > 0:
+        if today_S > yest_S * 1.1:       score += 5
+        elif today_S > yest_S:            score += 3
+        elif today_S > yest_S * 0.9:      score += 1
+    else:
+        score += 2
+
+    open_0930   = float(row.get('open_0930') or 0)
+    prev_close  = float(row.get('prev_close') or 0)
+    curr_price  = float(row.get('buy_price') or 0)
+    if open_0930 > 0 and prev_close > 0:
+        if open_0930 > prev_close and curr_price > open_0930:
+            score += 5
+        elif open_0930 > prev_close and curr_price > prev_close:
+            score += 3
+        elif open_0930 < prev_close and curr_price > prev_close:
+            score += 2
+        elif curr_price > prev_close:
+            score += 1
+
+    return score

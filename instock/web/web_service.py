@@ -70,6 +70,9 @@ class Application(tornado.web.Application):
             (r"/api/volume_detail",        volumeHandler.ApiVolumeDetailHandler),
             (r"/api/leader_strength",      volumeHandler.ApiLeaderStrengthHandler),
             (r"/api/mainline_core",        volumeHandler.ApiMainlineCoreHandler),
+            (r"/api/daily_recommend",      volumeHandler.ApiDailyRecommendHandler),
+            (r"/api/strategy_validation",  volumeHandler.ApiStrategyValidationHandler),
+            (r"/api/strategy_validation_experiment", volumeHandler.ApiStrategyValidationExperimentHandler),
             (r"/api/stock_signal_detail",  volumeHandler.ApiStockSignalDetailHandler),
             (r"/api/sector_list",          volumeHandler.ApiSectorListHandler),
             (r"/api/sector_stocks",        volumeHandler.ApiSectorStocksHandler),
@@ -136,6 +139,32 @@ class HomeHandler(webBase.BaseHandler, ABC):
                     leftMenu=webBase.GetLeftMenu(self.request.uri))
 
 
+def _auto_start_daemon():
+    """Web 服务启动时，自动拉起量能监控 Daemon（如果未运行）"""
+    import subprocess
+    import psutil
+    try:
+        for proc in psutil.process_iter(['pid', 'cmdline']):
+            cmd = ' '.join(proc.info.get('cmdline') or [])
+            if 'volume_monitor_daemon' in cmd:
+                logging.error(f"量能监控 Daemon 已在运行，PID={proc.pid}，跳过自动启动")
+                return
+        # 未找到，启动新进程
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        log_file = '/tmp/volume_monitor.log'
+        with open(log_file, 'a') as f:
+            p = subprocess.Popen(
+                [sys.executable, '-m', 'instock.job.volume_monitor_daemon'],
+                cwd=project_root,
+                stdout=f, stderr=f,
+                start_new_session=True,
+            )
+        logging.error(f"量能监控 Daemon 已自动启动，PID={p.pid}")
+        print(f"量能监控 Daemon 已自动启动，PID={p.pid}")
+    except Exception as e:
+        logging.error(f"量能监控 Daemon 自动启动失败: {e}")
+
+
 def main():
     # tornado.options.parse_command_line()
     tornado.options.options.logging = None
@@ -146,6 +175,9 @@ def main():
 
     print(f"服务已启动，web地址 : http://localhost:{port}/")
     logging.error(f"服务已启动，web地址 : http://localhost:{port}/")
+
+    # 自动拉起量能监控 Daemon
+    _auto_start_daemon()
 
     tornado.ioloop.IOLoop.current().start()
 

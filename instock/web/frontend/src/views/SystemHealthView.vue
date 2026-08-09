@@ -79,6 +79,72 @@
             <span class="detail-text" :class="{ 'detail-err': !row.ok && !row.warn }">
               {{ row.detail || '-' }}
             </span>
+            <div v-if="row.minute_diag" class="minute-diag">
+              <div class="diag-head">
+                <el-tag size="small" :type="diagStatusType(row.minute_diag.status_text)">
+                  {{ row.minute_diag.status_text || '-' }}
+                </el-tag>
+                <span>当前 {{ row.minute_diag.now || '-' }}</span>
+                <span>稳定应到 {{ row.minute_diag.stable_until || '-' }}</span>
+                <span>{{ row.minute_diag.latency_note }}</span>
+              </div>
+
+              <div class="diag-grid">
+                <div class="diag-box">
+                  <div class="diag-title">PG 持久化</div>
+                  <div class="diag-line">最新 {{ row.minute_diag.pg?.latest_time || '-' }}，{{ row.minute_diag.pg?.latest_count ?? 0 }} 只，延迟 {{ row.minute_diag.pg?.latest_lag || '-' }}</div>
+                  <div class="diag-line">基准 {{ row.minute_diag.pg?.baseline_count ?? 0 }} 只/分钟，阈值 {{ row.minute_diag.pg?.threshold_count ?? 0 }}，共 {{ fmtInt(row.minute_diag.pg?.row_count) }} 条</div>
+                  <div class="diag-line">稳定缺口 {{ row.minute_diag.pg?.stable_bad_count ?? 0 }} 个</div>
+                  <div v-if="row.minute_diag.pg?.bad_examples?.length" class="diag-examples">
+                    <el-tag
+                      v-for="item in row.minute_diag.pg.bad_examples"
+                      :key="`pg-${item.time}`"
+                      size="small"
+                      type="danger"
+                      effect="plain"
+                    >
+                      {{ item.time }}:{{ item.count }}
+                    </el-tag>
+                  </div>
+                </div>
+
+                <div class="diag-box">
+                  <div class="diag-title">Redis 实时缓存</div>
+                  <div class="diag-line">最新 {{ row.minute_diag.redis?.latest_time || '-' }}，{{ row.minute_diag.redis?.latest_count ?? 0 }} 只，延迟 {{ row.minute_diag.redis?.latest_lag || '-' }}</div>
+                  <div class="diag-line">键 {{ row.minute_diag.redis?.key_count ?? 0 }} 只，Bar {{ fmtInt(row.minute_diag.redis?.bar_count) }} 条，基准 {{ row.minute_diag.redis?.baseline_count ?? 0 }}</div>
+                  <div class="diag-line">稳定缺口 {{ row.minute_diag.redis?.stable_bad_count ?? 0 }} 个</div>
+                  <div v-if="row.minute_diag.redis?.latest_distribution?.length" class="diag-examples">
+                    <el-tag
+                      v-for="item in row.minute_diag.redis.latest_distribution"
+                      :key="`redis-latest-${item.time}`"
+                      size="small"
+                      type="info"
+                      effect="plain"
+                    >
+                      最新{{ item.time }}:{{ item.count }}只
+                    </el-tag>
+                  </div>
+                  <div v-if="row.minute_diag.redis?.bad_examples?.length" class="diag-examples">
+                    <el-tag
+                      v-for="item in row.minute_diag.redis.bad_examples"
+                      :key="`redis-bad-${item.time}`"
+                      size="small"
+                      type="danger"
+                      effect="plain"
+                    >
+                      {{ item.time }}:{{ item.count }}
+                    </el-tag>
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="row.minute_diag.fill_task?.running" class="diag-task">
+                补全运行中：{{ row.minute_diag.fill_task.progress || 0 }}%，{{ row.minute_diag.fill_task.message || '-' }}
+              </div>
+              <div v-else-if="row.minute_diag.fill_task?.updated_at" class="diag-task">
+                最近补全：{{ row.minute_diag.fill_task.stage || '-' }}，{{ row.minute_diag.fill_task.updated_at }}，{{ row.minute_diag.fill_task.message || '-' }}
+              </div>
+            </div>
           </template>
         </el-table-column>
 
@@ -201,6 +267,18 @@ function groupErrorCount(group) {
   return group.filter(c => !c.ok && !c.warn && c.required).length
 }
 
+function fmtInt(v) {
+  const n = Number(v)
+  return Number.isFinite(n) ? n.toLocaleString('zh-CN') : '0'
+}
+
+function diagStatusType(v) {
+  if (v === '完整') return 'success'
+  if (v === '采集中/有延迟') return 'warning'
+  if (v === '补全任务运行中') return 'warning'
+  return 'danger'
+}
+
 // ── 操作按钮 ─────────────────────────────────────────────────────────────────
 const ACTION_LABELS = {
   restart_daemon:  '重启Daemon',
@@ -295,4 +373,54 @@ async function doAction(action, name) {
 
 .detail-text     { font-size: 12px; color: #606266; word-break: break-all; }
 .detail-err      { color: #f56c6c; font-weight: 500; }
+
+.minute-diag {
+  margin-top: 8px;
+  padding: 8px;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  background: #fff;
+}
+.diag-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: #606266;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.diag-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.diag-box {
+  padding: 8px;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  background: #fafafa;
+}
+.diag-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #303133;
+  margin-bottom: 4px;
+}
+.diag-line {
+  color: #606266;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.diag-examples {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+}
+.diag-task {
+  margin-top: 8px;
+  color: #909399;
+  font-size: 12px;
+}
 </style>

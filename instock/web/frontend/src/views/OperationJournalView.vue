@@ -250,7 +250,6 @@ const emptyForm = () => ({
   signal_snapshot_time: '',
   signal_core_score: null,
   signal_mode: '',
-  signal_buy_status: '',
   signal_amount_ratio: null,
   signal_risk: '',
 })
@@ -315,7 +314,6 @@ function applyQueryToForm() {
   if (q.signal_snapshot_time) form.value.signal_snapshot_time = String(q.signal_snapshot_time)
   if (q.signal_core_score !== undefined) form.value.signal_core_score = toNumberOrNull(q.signal_core_score)
   if (q.signal_mode) form.value.signal_mode = String(q.signal_mode)
-  if (q.signal_buy_status) form.value.signal_buy_status = String(q.signal_buy_status)
   if (q.signal_amount_ratio !== undefined) form.value.signal_amount_ratio = toNumberOrNull(q.signal_amount_ratio)
   if (q.signal_risk) form.value.signal_risk = String(q.signal_risk)
 }
@@ -342,7 +340,6 @@ function buildSystemJudgment() {
   return [
     `核心分：${signalNumber(form.value.signal_core_score, 1)}`,
     `模式：${form.value.signal_mode || '-'}`,
-    `买入状态：${form.value.signal_buy_status || '-'}`,
     `量比：${signalNumber(form.value.signal_amount_ratio, 2)}`,
     `风险：${form.value.signal_risk || '无'}`,
   ].join('；')
@@ -359,7 +356,6 @@ function applySignalDetail(detail, snapshot) {
   form.value.signal_snapshot_time = snapshot
   form.value.signal_core_score = toNumberOrNull(detail.core_score ?? detail.score)
   form.value.signal_mode = detail.trade_mode || detail.signal_type || ''
-  form.value.signal_buy_status = detail.observe_label || ''
   form.value.signal_amount_ratio = toNumberOrNull(detail.amt_vs_prev)
   form.value.signal_risk = risks
   form.value.system_judgment = buildSystemJudgment()

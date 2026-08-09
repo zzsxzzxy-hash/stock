@@ -141,6 +141,7 @@
             :row="selectedDetail"
             :date="meta.date"
             active-mode="mainline"
+            :focus-time="meta.snapshot || ''"
             editable-theme
             clickable-code
             @open-indicators="openIndicators"

@@ -17,7 +17,6 @@ from instock.job.morning_signal_replay import Thresholds, enrich, fetch_rows
 from instock.web.apiHandler import _system_judgment_text
 from instock.web.volumeHandler import (
     _mainline_core_score,
-    _mainline_observe_label,
     _mainline_risk_tags,
     _mainline_trade_mode,
     _stock_signal_detail_for_code,
@@ -73,7 +72,6 @@ def _signal_item(detail: dict, trade_time: str) -> dict:
         'signal_snapshot_time': trade_time,
         'signal_core_score': detail.get('core_score', detail.get('score')),
         'signal_mode': str(detail.get('trade_mode') or detail.get('signal_type') or '').strip(),
-        'signal_buy_status': str(detail.get('observe_label') or '').strip(),
         'signal_amount_ratio': detail.get('amt_vs_prev'),
         'signal_risk': _risk_text(detail),
     }
@@ -102,7 +100,6 @@ def _replay_details(date: str, trade_time: str, codes: list[str]) -> dict[str, d
         detail['mainline_theme'] = row.get('best_sector') or ''
         detail['trade_mode'] = _mainline_trade_mode(detail)
         detail['core_score'] = _mainline_core_score(detail)
-        detail['observe_label'] = _mainline_observe_label(detail)
         detail['risk_tags'] = _mainline_risk_tags(detail)
         detail['replay_warning'] = _replay_warning(row)
         out[code] = detail
@@ -163,7 +160,6 @@ def backfill(refresh: bool = False) -> tuple[int, int, int]:
                        signal_snapshot_time = %s,
                        signal_core_score = %s,
                        signal_mode = %s,
-                       signal_buy_status = %s,
                        signal_amount_ratio = %s,
                        signal_risk = %s,
                        updated_at = CURRENT_TIMESTAMP
@@ -176,7 +172,6 @@ def backfill(refresh: bool = False) -> tuple[int, int, int]:
                     item['signal_snapshot_time'],
                     item['signal_core_score'],
                     item['signal_mode'],
-                    item['signal_buy_status'],
                     item['signal_amount_ratio'],
                     item['signal_risk'],
                     item_id,
@@ -185,7 +180,7 @@ def backfill(refresh: bool = False) -> tuple[int, int, int]:
             updated += 1
             print(
                 f'[{index}/{len(rows)}] {date} {trade_time} {str(code).zfill(6)} '
-                f'{item["signal_mode"] or "数据不足"} / {item["signal_buy_status"] or "-"}'
+                f'{item["signal_mode"] or "数据不足"}'
             )
         except Exception as exc:
             failed += 1

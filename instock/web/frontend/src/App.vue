@@ -47,6 +47,9 @@
             <el-menu-item index="/operation_journal">
               <span>每日操作记录</span>
             </el-menu-item>
+            <el-menu-item index="/strategy_validation">
+              <span>策略验证/胜率复盘</span>
+            </el-menu-item>
           </el-sub-menu>
 
           <!-- 固定项：量能监控（在自有策略同级插入）-->
@@ -146,6 +149,7 @@ const pageTitle = computed(() => {
   if (path === '/watchlist') return '我的关注'
   if (path === '/operation_strategy') return '超短主线接力'
   if (path === '/operation_journal') return '每日操作记录'
+  if (path === '/strategy_validation') return '策略验证/胜率复盘'
   if (path === '/indicators') return 'K线指标图表'
   if (path === '/volume_monitor') return '量能异动监控'
   if (path === '/leader_strength') return '龙头强势'

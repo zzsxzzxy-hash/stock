@@ -414,8 +414,94 @@ def _check_minute_bar_pg(today: str) -> dict:
         return {'ok': False, 'detail': str(e)}
 
 
+def _minute_index(value: str) -> int | None:
+    try:
+        hh, mm = str(value or '')[:5].split(':')
+        return int(hh) * 60 + int(mm)
+    except Exception:
+        return None
+
+
+def _stable_expected_minute(expected: list[str], lag_minutes: int = 2) -> str:
+    if not expected:
+        return ''
+    if len(expected) <= lag_minutes:
+        return expected[-1]
+    return expected[-1 - lag_minutes]
+
+
+def _lag_text(latest: str, expected: str) -> str:
+    latest_idx = _minute_index(latest)
+    expected_idx = _minute_index(expected)
+    if latest_idx is None or expected_idx is None:
+        return '-'
+    lag = max(0, expected_idx - latest_idx)
+    return f'{lag}分钟' if lag else '0分钟'
+
+
+def _redis_minute_stats(today: str, expected: list[str]) -> dict:
+    from instock.core.minute_bar_collector import get_redis
+
+    r = get_redis()
+    pattern = f'minute_bar:{today}:*'
+    cursor = 0
+    keys = []
+    while True:
+        cursor, batch = r.scan(cursor, match=pattern, count=1000)
+        keys.extend(batch)
+        if cursor == 0:
+            break
+
+    code_count = len(keys)
+    time_counts: dict[str, int] = {}
+    latest_by_code: dict[str, int] = {}
+    total_bars = 0
+    batch_size = 500
+    for i in range(0, len(keys), batch_size):
+        batch = keys[i:i + batch_size]
+        for key, raw in zip(batch, r.mget(batch)):
+            if not raw:
+                continue
+            try:
+                bars = json.loads(raw)
+            except Exception:
+                bars = []
+            if not bars:
+                continue
+            code = str(key).split(':')[-1]
+            latest = ''
+            for bar in bars:
+                t = str(bar.get('time') or '')[:5]
+                if not t:
+                    continue
+                time_counts[t] = time_counts.get(t, 0) + 1
+                total_bars += 1
+                if latest == '' or t > latest:
+                    latest = t
+            if latest:
+                latest_by_code[latest] = latest_by_code.get(latest, 0) + 1
+
+    latest_time = max(latest_by_code.keys()) if latest_by_code else ''
+    latest_count = latest_by_code.get(latest_time, 0) if latest_time else 0
+    max_count = max(time_counts.values()) if time_counts else 0
+    min_expected_count = min((time_counts.get(t, 0) for t in expected), default=0)
+    return {
+        'key_count': code_count,
+        'bar_count': total_bars,
+        'latest_time': latest_time,
+        'latest_count': latest_count,
+        'latest_distribution': [
+            {'time': t, 'count': c}
+            for t, c in sorted(latest_by_code.items(), reverse=True)[:5]
+        ],
+        'max_count': max_count,
+        'min_expected_count': min_expected_count,
+        'time_counts': time_counts,
+    }
+
+
 def _check_minute_integrity(today: str, include_running: bool = True) -> dict:
-    """按分钟检查今日 PG 分钟K线是否存在明显缺口。"""
+    """按分钟检查今日 PG/Redis 分钟K线是否存在明显缺口。"""
     try:
         fill_status = _minute_fill_snapshot() if include_running else {}
         if include_running and fill_status.get('running'):
@@ -426,6 +512,10 @@ def _check_minute_integrity(today: str, include_running: bool = True) -> dict:
                 'running': True,
                 'progress': progress,
                 'detail': f"补全运行中 {progress}%：{fill_status.get('message') or '-'}",
+                'minute_diag': {
+                    'status_text': '补全任务运行中',
+                    'fill_task': fill_status,
+                },
             }
 
         import instock.lib.database as mdb
@@ -453,6 +543,7 @@ def _check_minute_integrity(today: str, include_running: bool = True) -> dict:
         ]
         if not expected:
             return {'ok': True, 'warn': True, 'detail': f"当前{hhmm}，无应检查分钟"}
+        stable_until = _stable_expected_minute(expected)
 
         rows = mdb.executeSqlFetch(
             '''SELECT time, COUNT(DISTINCT code) AS cnt
@@ -466,39 +557,110 @@ def _check_minute_integrity(today: str, include_running: bool = True) -> dict:
             (r[0].strftime('%H:%M') if hasattr(r[0], 'strftime') else str(r[0])[:5]): int(r[1])
             for r in rows or []
         }
-        if not counts:
-            return {
-                'ok': False,
-                'detail': f"今日 PG 分钟线为空，应有 {expected[0]}~{expected[-1]}",
-            }
-
-        max_count = max(counts.values())
+        max_count = max(counts.values()) if counts else 0
         min_count = min(counts.get(t, 0) for t in expected)
         threshold = max(100, int(max_count * 0.95))
         bad = [(t, counts.get(t, 0)) for t in expected if counts.get(t, 0) < threshold]
-        latest_time = max(counts.keys())
+        stable_expected = [t for t in expected if t <= stable_until]
+        stable_bad = [(t, counts.get(t, 0)) for t in stable_expected if counts.get(t, 0) < threshold]
+        latest_time = max(counts.keys()) if counts else ''
         row_count = mdb.executeSqlCount(
             'SELECT COUNT(*) FROM cn_stock_minute_bar WHERE date=%s',
             (today,)
         )
+        redis_stats = _redis_minute_stats(today, expected)
+        redis_threshold = max(100, int((redis_stats.get('max_count') or 0) * 0.95))
+        redis_stable_bad = [
+            (t, (redis_stats.get('time_counts') or {}).get(t, 0))
+            for t in stable_expected
+            if (redis_stats.get('time_counts') or {}).get(t, 0) < redis_threshold
+        ]
 
-        if bad:
-            examples = ', '.join(f"{t}:{cnt}" for t, cnt in bad[:10])
-            more = f" 等{len(bad)}分钟" if len(bad) > 10 else ''
+        pg_latest_lag = _lag_text(latest_time, stable_until)
+        redis_latest = redis_stats.get('latest_time') or ''
+        redis_latest_lag = _lag_text(redis_latest, stable_until)
+        status_text = '完整'
+        reason = ''
+        if not counts and not redis_stats.get('key_count'):
+            status_text = '未开始'
+            reason = 'PG 和 Redis 今日分钟线均为空，通常是采集/补全任务未启动。'
+        elif stable_bad or redis_stable_bad:
+            status_text = '不完整'
+            reason = '稳定延迟窗口内仍存在分钟缺口，需要补全或等待任务完成。'
+        elif bad or redis_latest < stable_until:
+            status_text = '采集中/有延迟'
+            reason = '最新分钟落后当前时间，但稳定延迟窗口内暂未发现明显缺口。'
+
+        diag = {
+            'today': today,
+            'now': hhmm,
+            'check_until': until,
+            'stable_until': stable_until,
+            'latency_note': '盘中允许最近约2分钟延迟；超过稳定分钟仍缺口才算不完整。',
+            'status_text': status_text,
+            'reason': reason,
+            'pg': {
+                'row_count': row_count,
+                'minute_count': len(counts),
+                'latest_time': latest_time,
+                'latest_count': counts.get(latest_time, 0) if latest_time else 0,
+                'latest_lag': pg_latest_lag,
+                'baseline_count': max_count,
+                'threshold_count': threshold,
+                'min_expected_count': min_count,
+                'bad_count': len(bad),
+                'stable_bad_count': len(stable_bad),
+                'bad_examples': [{'time': t, 'count': c} for t, c in bad[:10]],
+            },
+            'redis': {
+                'key_count': redis_stats.get('key_count') or 0,
+                'bar_count': redis_stats.get('bar_count') or 0,
+                'latest_time': redis_latest,
+                'latest_count': redis_stats.get('latest_count') or 0,
+                'latest_lag': redis_latest_lag,
+                'baseline_count': redis_stats.get('max_count') or 0,
+                'threshold_count': redis_threshold,
+                'min_expected_count': redis_stats.get('min_expected_count') or 0,
+                'stable_bad_count': len(redis_stable_bad),
+                'latest_distribution': redis_stats.get('latest_distribution') or [],
+                'bad_examples': [{'time': t, 'count': c} for t, c in redis_stable_bad[:10]],
+            },
+            'fill_task': fill_status,
+        }
+
+        def _examples(items):
+            return ', '.join(f"{t}:{cnt}" for t, cnt in items[:6])
+
+        if status_text == '未开始':
+            return {
+                'ok': False,
+                'detail': f"未开始：PG 0条，Redis 0只；应检查 {expected[0]}~{stable_until}",
+                'minute_diag': diag,
+            }
+
+        if stable_bad or redis_stable_bad:
+            pg_examples = _examples(stable_bad)
+            redis_examples = _examples(redis_stable_bad)
             return {
                 'ok': False,
                 'detail': (
-                    f"不完整：最新{latest_time}，基准{max_count}只/分钟，最低{min_count}，"
-                    f"缺口{examples}{more}，PG共{row_count:,}条"
+                    f"不完整：应到{stable_until}；"
+                    f"PG最新{latest_time or '-'}({counts.get(latest_time, 0) if latest_time else 0}只, 延迟{pg_latest_lag})，"
+                    f"Redis最新{redis_latest or '-'}({redis_stats.get('latest_count') or 0}只, 延迟{redis_latest_lag})；"
+                    f"PG缺口{pg_examples or '无'}；Redis缺口{redis_examples or '无'}"
                 ),
+                'minute_diag': diag,
             }
 
         return {
             'ok': True,
+            'warn': status_text != '完整',
             'detail': (
-                f"完整：{expected[0]}~{expected[-1]} 共{len(expected)}分钟，"
-                f"基准{max_count}只/分钟，最低{min_count}，PG共{row_count:,}条"
+                f"{status_text}：应到{stable_until}；"
+                f"PG最新{latest_time or '-'}({counts.get(latest_time, 0) if latest_time else 0}只, 延迟{pg_latest_lag}, 共{row_count:,}条)；"
+                f"Redis最新{redis_latest or '-'}({redis_stats.get('latest_count') or 0}只, 延迟{redis_latest_lag}, {redis_stats.get('key_count') or 0}只)"
             ),
+            'minute_diag': diag,
         }
     except Exception as e:
         return {'ok': False, 'detail': str(e)}

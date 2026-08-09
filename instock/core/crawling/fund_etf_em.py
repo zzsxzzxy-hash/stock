@@ -12,14 +12,15 @@ __author__ = 'myh '
 __date__ = '2025/12/31 '
 
 
-def fund_etf_spot_em() -> pd.DataFrame:
+def fund_etf_spot_em(trade_date=None) -> pd.DataFrame:
     """
     ETF实时行情（Tushare API）
+    :param trade_date: 交易日，支持 YYYYMMDD / YYYY-MM-DD / date
     :return: ETF 实时行情
     :rtype: pandas.DataFrame
     """
     try:
-        return tushare_data.get_etf_spot()
+        return tushare_data.get_etf_spot(trade_date=trade_date)
     except Exception as e:
         logging.error(f"fund_etf_spot_em处理异常: {e}")
         return pd.DataFrame()

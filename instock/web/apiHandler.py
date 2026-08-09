@@ -104,7 +104,6 @@ def _system_judgment_text(item):
     return '；'.join([
         f"核心分：{display(item.get('signal_core_score'), 1)}",
         f"模式：{display(item.get('signal_mode'))}",
-        f"买入状态：{display(item.get('signal_buy_status'))}",
         f"量比：{display(item.get('signal_amount_ratio'), 2)}",
         f"风险：{display(item.get('signal_risk') or '无')}",
     ])
@@ -139,10 +138,6 @@ def _enrich_operation_signal(item):
         item['signal_mode'] = (
             item.get('signal_mode')
             or str(detail.get('trade_mode') or detail.get('signal_type') or '').strip()
-        )
-        item['signal_buy_status'] = (
-            item.get('signal_buy_status')
-            or str(detail.get('observe_label') or '').strip()
         )
         item['signal_amount_ratio'] = (
             item.get('signal_amount_ratio')
@@ -587,7 +582,7 @@ class ApiOperationLogHandler(webBase.BaseHandler, ABC):
         'trade_date', 'trade_time', 'code', 'name', 'action', 'price', 'quantity',
         'mainline', 'strategy', 'reason', 'result', 'follow_plan',
         'system_judgment', 'signal_strategy', 'signal_snapshot_time',
-        'signal_core_score', 'signal_mode', 'signal_buy_status',
+        'signal_core_score', 'signal_mode',
         'signal_amount_ratio', 'signal_risk'
     ]
 
@@ -615,7 +610,6 @@ class ApiOperationLogHandler(webBase.BaseHandler, ABC):
             'signal_snapshot_time': str(body.get('signal_snapshot_time') or '').strip()[:5],
             'signal_core_score': _num_or_none(body.get('signal_core_score')),
             'signal_mode': str(body.get('signal_mode') or '').strip(),
-            'signal_buy_status': str(body.get('signal_buy_status') or '').strip(),
             'signal_amount_ratio': _num_or_none(body.get('signal_amount_ratio')),
             'signal_risk': str(body.get('signal_risk') or '').strip(),
         }
@@ -687,7 +681,7 @@ class ApiOperationLogHandler(webBase.BaseHandler, ABC):
                 'trade_date', 'trade_time', 'code', 'name', 'action', 'price', 'quantity',
                 'mainline', 'strategy', 'reason', 'result', 'follow_plan',
                 'system_judgment', 'signal_strategy', 'signal_snapshot_time',
-                'signal_core_score', 'signal_mode', 'signal_buy_status',
+                'signal_core_score', 'signal_mode',
                 'signal_amount_ratio', 'signal_risk'
             ]
             insert_columns = ', '.join(insert_fields)
@@ -728,7 +722,7 @@ class ApiOperationLogHandler(webBase.BaseHandler, ABC):
                     price=%s, quantity=%s, mainline=%s, strategy=%s,
                     reason=%s, result=%s, follow_plan=%s,
                     system_judgment=%s, signal_strategy=%s, signal_snapshot_time=%s,
-                    signal_core_score=%s, signal_mode=%s, signal_buy_status=%s,
+                    signal_core_score=%s, signal_mode=%s,
                     signal_amount_ratio=%s, signal_risk=%s,
                     updated_at=CURRENT_TIMESTAMP
                 WHERE id=%s
@@ -738,7 +732,7 @@ class ApiOperationLogHandler(webBase.BaseHandler, ABC):
                 item['price'], item['quantity'], item['mainline'], item['strategy'],
                 item['reason'], item['result'], item['follow_plan'],
                 item['system_judgment'], item['signal_strategy'], item['signal_snapshot_time'],
-                item['signal_core_score'], item['signal_mode'], item['signal_buy_status'],
+                item['signal_core_score'], item['signal_mode'],
                 item['signal_amount_ratio'], item['signal_risk'],
                 item_id
             )

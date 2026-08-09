@@ -11,6 +11,7 @@ const routes = [
   { path: '/watchlist',           component: () => import('@/views/WatchlistView.vue') },
   { path: '/operation_strategy',  component: () => import('@/views/OperationStrategyView.vue') },
   { path: '/operation_journal',   component: () => import('@/views/OperationJournalView.vue') },
+  { path: '/strategy_validation', component: () => import('@/views/StrategyValidationView.vue') },
   { path: '/system_health',       component: () => import('@/views/SystemHealthView.vue') },
   { path: '/factor_config',       component: () => import('@/views/FactorConfigView.vue') },
   { path: '/score_single',         component: () => import('@/views/ScoreSingleView.vue') },

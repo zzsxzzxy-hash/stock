@@ -18,9 +18,6 @@
           <el-tag v-if="row.mainline_theme" size="small" type="primary" effect="plain">
             {{ row.mainline_theme }}
           </el-tag>
-          <el-tag v-if="row.observe_label" size="small" :type="observeTone(row.observe_label)">
-            {{ row.observe_label }}
-          </el-tag>
           <el-tag v-if="row.signal_type" size="small" effect="plain">{{ row.signal_type }}</el-tag>
         </div>
         <div class="stock-sub">
@@ -55,19 +52,19 @@
       </div>
     </header>
 
-    <div class="metric-grid">
-      <Metric label="买入价" :value="fmtPrice(row.buy_price)" />
-      <Metric label="早盘涨幅" :value="fmtPct(row.ret_vs_prevclose)" :tone="tone(row.ret_vs_prevclose)" />
-      <Metric label="区间位置" :value="fmtPct(row.pos_in_range)" />
-      <Metric label="回撤" :value="fmtPct(row.pullback)" tone="green" />
-      <Metric label="量能同比" :value="fmtRatio(row.amt_vs_prev)" />
-      <Metric label="推进效率" :value="fmtNum(row.push_efficiency, 2)" />
-      <Metric label="距30日高" :value="fmtPct(row.distance_to_30d_high)" />
-      <Metric label="日内最高" :value="fmtPct(row.day_max_up_pct)" :tone="tone(row.day_max_up_pct)" />
-      <Metric label="日内收盘" :value="fmtPct(row.day_close_return_pct)" :tone="tone(row.day_close_return_pct)" />
-      <Metric label="次日开盘" :value="fmtPct(row.next_open_return_pct)" :tone="tone(row.next_open_return_pct)" />
-      <Metric label="次日10点" :value="fmtPct(row.next_1000_return_pct)" :tone="tone(row.next_1000_return_pct)" />
-      <Metric label="次日卖点" :value="fmtPct(row.next_1000_max_up_pct)" :tone="tone(row.next_1000_max_up_pct)" />
+    <div class="metric-grid" :class="{ 'metric-grid-compact': metricFields.length <= 2 }">
+      <Metric v-if="showMetric('buy_price')" label="买入价" :value="fmtPrice(row.buy_price)" />
+      <Metric v-if="showMetric('morning_ret')" label="早盘涨幅" :value="fmtPct(row.ret_vs_prevclose)" :tone="tone(row.ret_vs_prevclose)" />
+      <Metric v-if="showMetric('position')" label="区间位置" :value="fmtPct(row.pos_in_range)" />
+      <Metric v-if="showMetric('pullback')" label="回撤" :value="fmtPct(row.pullback)" tone="green" />
+      <Metric v-if="showMetric('volume')" :label="volumeLabel" :value="fmtRatio(row.amt_vs_prev)" />
+      <Metric v-if="showMetric('efficiency')" label="推进效率" :value="fmtNum(row.push_efficiency, 2)" />
+      <Metric v-if="showMetric('distance_30d')" label="距30日高" :value="fmtPct(row.distance_to_30d_high)" />
+      <Metric v-if="showMetric('day_high')" label="日内最高" :value="fmtPct(row.day_max_up_pct)" :tone="tone(row.day_max_up_pct)" />
+      <Metric v-if="showMetric('day_close')" label="日内收盘" :value="fmtPct(row.day_close_return_pct)" :tone="tone(row.day_close_return_pct)" />
+      <Metric v-if="showMetric('next_open')" label="次日开盘" :value="fmtPct(row.next_open_return_pct)" :tone="tone(row.next_open_return_pct)" />
+      <Metric v-if="showMetric('next_1000')" label="次日10点" :value="fmtPct(row.next_1000_return_pct)" :tone="tone(row.next_1000_return_pct)" />
+      <Metric v-if="showMetric('next_sell')" label="次日卖点" :value="fmtPct(row.next_1000_max_up_pct)" :tone="tone(row.next_1000_max_up_pct)" />
     </div>
 
     <div class="tag-line">
@@ -88,6 +85,8 @@
       :bars="row.today_bars || []"
       :compare-date="row.prev_date || row.prev_d"
       :compare-bars="row.prev_bars || []"
+      :daily-bars="dailyBars"
+      :focus-time="focusTime"
     />
   </section>
 </template>
@@ -96,10 +95,17 @@
 import { defineComponent, h } from 'vue'
 import MinuteBarChart from '@/components/MinuteBarChart.vue'
 
-defineProps({
+const props = defineProps({
   row: { type: Object, required: true },
   date: { type: String, default: '' },
   activeMode: { type: String, default: 'strict' },
+  volumeLabel: { type: String, default: '量能同比' },
+  metricFields: {
+    type: Array,
+    default: () => ['buy_price', 'morning_ret', 'position', 'pullback', 'volume', 'efficiency', 'distance_30d', 'day_high', 'day_close', 'next_open', 'next_1000', 'next_sell'],
+  },
+  dailyBars: { type: Array, default: () => [] },
+  focusTime: { type: String, default: "" },
   editableTheme: { type: Boolean, default: false },
   clickableCode: { type: Boolean, default: false },
 })
@@ -144,6 +150,10 @@ function tone(v) {
   const n = Number(v)
   if (!Number.isFinite(n) || n === 0) return ''
   return n > 0 ? 'red' : 'green'
+}
+
+function showMetric(key) {
+  return props.metricFields.includes(key)
 }
 
 function observeTone(label) {
@@ -229,6 +239,10 @@ function splitTags(tags) {
   grid-template-columns: repeat(6, minmax(86px, 1fr));
   gap: 8px;
   margin-bottom: 8px;
+}
+
+.metric-grid-compact {
+  grid-template-columns: repeat(2, minmax(180px, 260px));
 }
 
 .metric {

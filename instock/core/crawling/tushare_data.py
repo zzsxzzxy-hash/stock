@@ -537,10 +537,11 @@ class TushareData:
 
     # ==================== ETF行情 ====================
 
-    def get_etf_spot(self):
+    def get_etf_spot(self, trade_date=None):
         """
         ETF实时行情（兼容东方财富fund_etf_spot_em输出格式）
         Tushare接口: fund_basic + daily
+        trade_date 传入时按指定交易日精确查询；不传时才兜底今日/昨日。
         """
         if not self.is_available():
             return pd.DataFrame()
@@ -550,13 +551,24 @@ class TushareData:
             if fund_list is None or fund_list.empty:
                 return pd.DataFrame()
 
-            # 获取最新日线数据
-            trade_date = datetime.datetime.now().strftime('%Y%m%d')
-            daily = self.pro.fund_daily(trade_date=trade_date)
-            if daily is None or daily.empty:
-                # 尝试上一个交易日
-                yesterday = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime('%Y%m%d')
-                daily = self.pro.fund_daily(trade_date=yesterday)
+            if trade_date is not None:
+                if hasattr(trade_date, 'strftime'):
+                    query_dates = [trade_date.strftime('%Y%m%d')]
+                else:
+                    query_dates = [str(trade_date).replace('-', '')]
+            else:
+                query_dates = [
+                    datetime.datetime.now().strftime('%Y%m%d'),
+                    (datetime.datetime.now() - datetime.timedelta(days=1)).strftime('%Y%m%d'),
+                ]
+
+            daily = pd.DataFrame()
+            used_trade_date = ''
+            for query_date in query_dates:
+                daily = self.pro.fund_daily(trade_date=query_date)
+                if daily is not None and not daily.empty:
+                    used_trade_date = query_date
+                    break
 
             if daily is None or daily.empty:
                 return pd.DataFrame()
@@ -581,6 +593,7 @@ class TushareData:
                 '流通市值': 0,
                 '总市值': 0,
             })
+            result.attrs['trade_date'] = used_trade_date
             return result
         except Exception as e:
             logging.error(f"Tushare获取ETF行情失败: {e}")
